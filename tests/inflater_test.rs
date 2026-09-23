@@ -172,4 +172,149 @@ mod tests {
 
         assert_eq!(inflated, Err("unexpected end of input".to_string()));
     }
+
+    // Dynamic Huffman blocks. zlib streams use the default strategy; the small
+    // edge cases are hand-encoded (and checked against zlib when they are valid).
+
+    #[test]
+    fn inflate_dynamic_block_from_zlib() {
+        // ~110 KB of text in dynamic blocks.
+        let data = include_bytes!("data/dynamic_text.deflate");
+        let expected = include_bytes!("data/dynamic_text.txt");
+
+        let inflated = Inflater::new(data).inflate().unwrap();
+
+        assert_eq!(inflated.len(), expected.len());
+        assert!(inflated == expected, "inflated output differs from expected text");
+    }
+
+    #[test]
+    fn inflate_multiple_dynamic_blocks_from_zlib() {
+        // Three dynamic blocks with different code tables: text, all 256 byte values, more text.
+        let data = include_bytes!("data/dynamic_multi.deflate");
+        let text = include_bytes!("data/dynamic_text.txt");
+
+        let inflated = Inflater::new(data).inflate().unwrap();
+
+        let mut expected = text[..3000].to_vec();
+        for _ in 0..4 {
+            expected.extend(0..=255u8);
+        }
+        expected.extend(&text[3000..9000]);
+        assert!(inflated == expected, "inflated output differs from expected data");
+    }
+
+    #[test]
+    fn inflate_dynamic_repeat_previous_crosses_into_distance_lengths() {
+        // Code 16 right after the last literal/length length repeats it into the
+        // distance lengths. RFC 1951 treats both length lists as one sequence.
+        let data = [
+            0x0D, 0x83, 0x05, 0x01, 0x00, 0x00, 0x00, 0x40, 0xB6, 0xF2,
+            0x7F, 0x04, 0x85, 0x1B,
+        ];
+
+        let inflated = Inflater::new(&data).inflate();
+
+        assert_eq!(inflated.unwrap(), b"ababa");
+    }
+
+    #[test]
+    fn inflate_dynamic_zero_run_crosses_into_distance_lengths() {
+        // Code 17 zero run that starts in the literal/length lengths and ends in the distance lengths.
+        let data = [
+            0x15, 0xC3, 0x21, 0x01, 0x00, 0x00, 0x00, 0x80, 0xA0, 0xAD,
+            0xEA, 0xFF, 0x0F, 0x26, 0xB0, 0x01,
+        ];
+
+        let inflated = Inflater::new(&data).inflate();
+
+        assert_eq!(inflated.unwrap(), b"abc");
+    }
+
+    #[test]
+    fn inflate_dynamic_rejects_repeat_previous_as_first_code() {
+        // Code 16 with no previous length to repeat.
+        let data = [0x05, 0x80, 0x03, 0x00, 0x00, 0x00, 0x00, 0x40, 0x02];
+
+        assert_eq!(
+            Inflater::new(&data).inflate(),
+            Err("repeat with no previous code length".to_string())
+        );
+    }
+
+    #[test]
+    fn inflate_dynamic_rejects_repeat_past_end_of_lengths() {
+        // Two 138-zero runs for only 258 lengths.
+        let data = [
+            0x05, 0x80, 0x81, 0x00, 0x00, 0x00, 0x00, 0x40, 0xFE, 0xFF,
+            0x01,
+        ];
+
+        assert_eq!(
+            Inflater::new(&data).inflate(),
+            Err("code length repeat past end".to_string())
+        );
+    }
+
+    #[test]
+    fn inflate_dynamic_rejects_too_many_literal_length_codes() {
+        // HLIT = 30 -> 287 codes; the maximum is 286.
+        let data = [
+            0xF5, 0x80, 0x81, 0x00, 0x00, 0x00, 0x00, 0x40, 0xFE, 0xFF,
+            0x03, 0x00,
+        ];
+
+        assert_eq!(
+            Inflater::new(&data).inflate(),
+            Err("too many length or distance symbols".to_string())
+        );
+    }
+
+    #[test]
+    fn inflate_dynamic_rejects_too_many_distance_codes() {
+        // HDIST = 30 -> 31 codes; the maximum is 30.
+        let data = [
+            0x05, 0x9E, 0x81, 0x00, 0x00, 0x00, 0x00, 0x40, 0xFE, 0xFF,
+            0x07, 0x00,
+        ];
+
+        assert_eq!(
+            Inflater::new(&data).inflate(),
+            Err("too many length or distance symbols".to_string())
+        );
+    }
+
+    #[test]
+    fn inflate_dynamic_rejects_over_subscribed_code_length_code() {
+        // Three code-length symbols of length 1.
+        let data = [0x05, 0x80, 0x81, 0x04, 0x00, 0x00, 0x00, 0x40, 0x00];
+
+        let inflated = Inflater::new(&data).inflate();
+
+        assert_eq!(inflated, Err("over-subscribed Huffman code".to_string()));
+    }
+
+    #[test]
+    fn inflate_dynamic_rejects_truncated_header() {
+        let data = include_bytes!("data/dynamic_text.deflate");
+
+        assert_eq!(
+            Inflater::new(&data[..20]).inflate(),
+            Err("unexpected end of input".to_string())
+        );
+    }
+
+    #[test]
+    fn inflate_dynamic_rejects_missing_end_of_block_code() {
+        // Hand-encoded: literals 'a' and 'b' have codes, symbol 256 does not.
+        let data = [
+            0x05, 0xC0, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90, 0x56,
+            0xFE, 0x27, 0x00,
+        ];
+
+        assert_eq!(
+            Inflater::new(&data).inflate(),
+            Err("missing end-of-block code".to_string())
+        );
+    }
 }

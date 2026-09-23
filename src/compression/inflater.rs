@@ -66,18 +66,27 @@ const DISTANCE_EXTRA_BITS: [u16; 30] = [
     13, 13
 ];
 
-const CODE_LENGTH_ORDER: [u16; 19] = [
+const CODE_LENGTH_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
 ];
 
+const MAX_LITERAL_LENGTH_CODES: usize = 286;
+const MAX_DISTANCE_CODES: usize = 30;
+
 pub struct Inflater<'a> {
     reader: BitReader<'a>,
+    code_length_decoder: HuffmanDecoder,
+    literal_length_decoder: HuffmanDecoder,
+    distance_decoder: HuffmanDecoder,
 }
 
 impl<'a> Inflater<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         Self {
-            reader: BitReader::new(data)
+            reader: BitReader::new(data),
+            code_length_decoder: HuffmanDecoder::empty(),
+            literal_length_decoder: HuffmanDecoder::empty(),
+            distance_decoder: HuffmanDecoder::empty(),
         }
     }
 
@@ -119,35 +128,95 @@ impl<'a> Inflater<'a> {
     fn inflate_fixed_huffman_block(&mut self, inflated_data: &mut Vec<u8>) -> Result<(), String> {
         let (literal_length_decoder, distance_decoder) = &*FIXED_DECODERS;
 
-        self.inflate_block(literal_length_decoder, distance_decoder, inflated_data)?;
+        Self::inflate_block(&mut self.reader, literal_length_decoder, distance_decoder, inflated_data)?;
 
         Ok(())
     }
 
     fn inflate_dynamic_huffman_block(&mut self, inflated_data: &mut Vec<u8>) -> Result<(), String> {
+        let hlit = self.reader.read_next_bits(5)? as usize + 257;
+        let hdist = self.reader.read_next_bits(5)? as usize + 1;
+        let hclen = self.reader.read_next_bits(4)? as usize + 4;
+
+        if hlit > MAX_LITERAL_LENGTH_CODES || hdist > MAX_DISTANCE_CODES {
+            return Err("too many length or distance symbols".to_string());
+        }
+
+        let mut code_length_code_lengths = [0u8; 19];
+
+        for &symbol in &CODE_LENGTH_ORDER[..hclen] {
+            code_length_code_lengths[symbol] = self.reader.read_next_bits(3)? as u8;
+        }
+
+        self.code_length_decoder.rebuild(&code_length_code_lengths)?;
+
+        let mut code_lengths = [0u8; MAX_LITERAL_LENGTH_CODES + MAX_DISTANCE_CODES];
+        let total = hlit + hdist;
+
+        let mut index = 0;
+        while index < total {
+            index = self.decode_code_length(&mut code_lengths[..total], index)?;
+        }
+
+        let (literal_length_code_lengths, distance_code_lengths) = code_lengths[..total].split_at(hlit);
+
+        if literal_length_code_lengths[256] == 0 {
+            return Err("missing end-of-block code".to_string());
+        }
+
+        self.literal_length_decoder.rebuild(literal_length_code_lengths)?;
+        self.distance_decoder.rebuild(distance_code_lengths)?;
+
+        Self::inflate_block(&mut self.reader, &self.literal_length_decoder, &self.distance_decoder, inflated_data)?;
+
         Ok(())
     }
 
-    fn inflate_block(&mut self, literal_length_decoder: &HuffmanDecoder, distance_decoder: &HuffmanDecoder, inflated_data: &mut Vec<u8>) -> Result<(), String> {
-        let mut symbol = literal_length_decoder.decode(&mut self.reader)?;
+    fn decode_code_length(&mut self, code_lengths: &mut [u8], index: usize) -> Result<usize, String> {
+        let symbol = self.code_length_decoder.decode(&mut self.reader)?;
+
+        let (code_length, repeat) = match symbol {
+            0..=15 => (symbol as u8, 1),
+            16 => {
+                if index == 0 {
+                    return Err("repeat with no previous code length".to_string());
+                }
+                (code_lengths[index - 1], self.reader.read_next_bits(2)? as usize + 3)
+            }
+            17 => (0, self.reader.read_next_bits(3)? as usize + 3),
+            18 => (0, self.reader.read_next_bits(7)? as usize + 11),
+            _ => unreachable!("code-length alphabet has 19 symbols"),
+        };
+
+        if repeat > code_lengths.len() - index {
+            return Err("code length repeat past end".to_string());
+        }
+
+        code_lengths[index..index + repeat].fill(code_length);
+
+        Ok(index + repeat)
+    }
+    
+    fn inflate_block(reader: &mut BitReader, literal_length_decoder: &HuffmanDecoder, distance_decoder: &HuffmanDecoder, inflated_data: &mut Vec<u8>) -> Result<(), String> {
+        let mut symbol = literal_length_decoder.decode(reader)?;
 
         while symbol != 256 {
             if symbol < 256 {
                 inflated_data.push(symbol as u8);
             } else {
-                let length = self.decode_length(symbol)?;
-                let distance_symbol = distance_decoder.decode(&mut self.reader)?;
-                let distance = self.decode_distance(distance_symbol)?;
-                self.copy_data_from_earlier(length, distance, inflated_data)?;
+                let length = Self::decode_length(reader, symbol)?;
+                let distance_symbol = distance_decoder.decode(reader)?;
+                let distance = Self::decode_distance(reader, distance_symbol)?;
+                Self::copy_data_from_earlier(length, distance, inflated_data)?;
             }
-            symbol = literal_length_decoder.decode(&mut self.reader)?;
+            symbol = literal_length_decoder.decode(reader)?;
         }
 
         Ok(())
     }
 
     #[inline]
-    fn decode_length(&mut self, symbol: usize) -> Result<u16, String> {
+    fn decode_length(reader: &mut BitReader, symbol: usize) -> Result<u16, String> {
         let length_index = symbol - 257;
 
         if length_index >= LENGTH_BASE.len() {
@@ -158,14 +227,14 @@ impl<'a> Inflater<'a> {
         let extra_bits = LENGTH_EXTRA_BITS[length_index];
 
         if extra_bits > 0 {
-            length += self.reader.read_next_bits(extra_bits as u32)? as u16;
+            length += reader.read_next_bits(extra_bits as u32)? as u16;
         }
 
         Ok(length)
     }
 
     #[inline]
-    fn decode_distance(&mut self, symbol: usize) -> Result<u16, String> {
+    fn decode_distance(reader: &mut BitReader, symbol: usize) -> Result<u16, String> {
         if symbol >= DISTANCE_BASE.len() {
             return Err("invalid distance symbol".to_string());
         }
@@ -174,14 +243,14 @@ impl<'a> Inflater<'a> {
         let extra_bits = DISTANCE_EXTRA_BITS[symbol];
 
         if extra_bits > 0 {
-            distance += self.reader.read_next_bits(extra_bits as u32)? as u16;
+            distance += reader.read_next_bits(extra_bits as u32)? as u16;
         }
 
         Ok(distance)
     }
 
     #[inline]
-    fn copy_data_from_earlier(&mut self, length: u16, distance: u16, inflated_data: &mut Vec<u8>) -> Result<(), String> {
+    fn copy_data_from_earlier(length: u16, distance: u16, inflated_data: &mut Vec<u8>) -> Result<(), String> {
         if distance as usize > inflated_data.len() {
             return Err("invalid distance: too far back".to_string());
         }

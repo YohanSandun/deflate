@@ -22,6 +22,21 @@ pub struct HuffmanDecoder {
 
 impl HuffmanDecoder {
     pub fn new(code_lengths: &[u8]) -> Result<Self, String> {
+        let mut decoder = Self::empty();
+        decoder.rebuild(code_lengths)?;
+        Ok(decoder)
+    }
+
+    /// A decoder with no codes; every decode fails until `rebuild` is called.
+    pub fn empty() -> Self {
+        Self {
+            table: [HuffmanEntry::Invalid; TABLE_SIZE],
+            secondary: Vec::new(),
+        }
+    }
+
+    /// Rebuilds the tables in place for new code lengths, reusing the secondary table allocation.
+    pub fn rebuild(&mut self, code_lengths: &[u8]) -> Result<(), String> {
         let mut bl_counts = [0u16; MAX_BITS + 1];
         for code_length in code_lengths {
             if *code_length as usize > MAX_BITS {
@@ -48,12 +63,10 @@ impl HuffmanDecoder {
             next_code[bits] = code;
         }
 
-        let mut decoder = Self {
-            table: [HuffmanEntry::Invalid; TABLE_SIZE],
-            secondary: Vec::new(),
-        };
+        self.table.fill(HuffmanEntry::Invalid);
+        self.secondary.clear();
 
-        decoder.allocate_secondary_tables(code_lengths, next_code);
+        self.allocate_secondary_tables(code_lengths, next_code);
 
         for symbol in 0..code_lengths.len() {
             let bits = code_lengths[symbol] as usize;
@@ -68,25 +81,18 @@ impl HuffmanDecoder {
             let reversed_code = Self::reverse_bits(canonical_code, bits);
 
             if bits <= TABLE_BITS {
-                decoder.insert_primary(reversed_code, bits, symbol as u16);
+                self.insert_primary(reversed_code, bits, symbol as u16);
             } else {
-                decoder.insert_secondary(reversed_code, bits, symbol as u16);
+                self.insert_secondary(reversed_code, bits, symbol as u16);
             }
         }
 
-        Ok(decoder)
+        Ok(())
     }
 
     #[inline]
-    fn reverse_bits(mut code: u16, length: usize) -> u16 {
-        let mut reversed = 0u16;
-
-        for _ in 0..length {
-            reversed = (reversed << 1) | (code & 1);
-            code >>= 1;
-        }
-
-        reversed
+    fn reverse_bits(code: u16, length: usize) -> u16 {
+        code.reverse_bits() >> (16 - length)
     }
 
     fn allocate_secondary_tables(&mut self, code_lengths: &[u8], mut next_code: [u16; MAX_BITS + 1]) {

@@ -149,4 +149,70 @@ mod tests {
 
         assert_eq!(decoder.decode(&mut reader), Err("invalid Huffman code".to_string()));
     }
+
+    #[test]
+    fn empty_decoder_rejects_every_code() {
+        let decoder = HuffmanDecoder::empty();
+        let data = [0x00, 0xFF];
+        let mut reader = BitReader::new(&data);
+
+        assert_eq!(decoder.decode(&mut reader), Err("invalid Huffman code".to_string()));
+    }
+
+    #[test]
+    fn rebuild_replaces_previous_codes() {
+        // Start with long codes so the secondary tables are populated, then rebuild
+        // with a short code set; nothing from the first table may leak through.
+        let mut lengths = vec![2u8, 2, 2];
+        lengths.extend(std::iter::repeat_n(10u8, 255));
+        lengths.extend([11u8, 11]);
+
+        let mut decoder = HuffmanDecoder::new(&lengths).unwrap();
+        decoder.rebuild(&[1, 2, 2]).unwrap();
+
+        let data = [0b00011010];
+        let mut reader = BitReader::new(&data);
+
+        assert_eq!(decoder.decode(&mut reader).unwrap(), 0);
+        assert_eq!(decoder.decode(&mut reader).unwrap(), 1);
+        assert_eq!(decoder.decode(&mut reader).unwrap(), 2);
+
+        // All-ones used to lead into a secondary table; now it's the 2-bit code for symbol 2.
+        let data = [0xFF, 0xFF];
+        let mut reader = BitReader::new(&data);
+        assert_eq!(decoder.decode(&mut reader).unwrap(), 2);
+    }
+
+    #[test]
+    fn rebuild_after_short_codes_supports_long_codes() {
+        let mut decoder = HuffmanDecoder::new(&[1, 2, 2]).unwrap();
+
+        let lengths = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15];
+        decoder.rebuild(&lengths).unwrap();
+
+        let symbols: Vec<usize> = (0..lengths.len()).rev().collect();
+        let data = encode(&lengths, &symbols);
+        let mut reader = BitReader::new(&data);
+
+        for &expected in &symbols {
+            assert_eq!(decoder.decode(&mut reader).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn rebuild_failure_leaves_decoder_unchanged() {
+        let mut decoder = HuffmanDecoder::new(&[1, 2, 2]).unwrap();
+
+        assert_eq!(
+            decoder.rebuild(&[1, 1, 1]),
+            Err("over-subscribed Huffman code".to_string())
+        );
+
+        let data = [0b00011010];
+        let mut reader = BitReader::new(&data);
+
+        assert_eq!(decoder.decode(&mut reader).unwrap(), 0);
+        assert_eq!(decoder.decode(&mut reader).unwrap(), 1);
+        assert_eq!(decoder.decode(&mut reader).unwrap(), 2);
+    }
 }
