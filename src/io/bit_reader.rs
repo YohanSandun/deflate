@@ -26,10 +26,10 @@ impl<'a> BitReader<'a> {
         if self.bit_count >= 32 {
             return;
         }
-
-        if self.byte_pos + 8 <= self.data.len() {
+        
+        if let Some(chunk) = self.data[self.byte_pos..].first_chunk::<8>() {
             // Fast path: one unaligned 8-byte load, keep as many whole bytes as fit.
-            let word = u64::from_le_bytes(self.data[self.byte_pos..self.byte_pos + 8].try_into().unwrap());
+            let word = u64::from_le_bytes(*chunk);
             let bytes = (63 - self.bit_count) / 8;
             let new_count = self.bit_count + bytes * 8;
 

@@ -139,7 +139,7 @@ impl HuffmanDecoder {
         let primary_index = code as usize & (TABLE_SIZE - 1);
 
         let HuffmanEntry::Secondary { offset, bits: table_bits } = self.table[primary_index] else {
-            unreachable!("secondary table not allocated for primary index {primary_index}");
+            unreachable!("secondary table not allocated");
         };
         let offset = offset as usize;
 

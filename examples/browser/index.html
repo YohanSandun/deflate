@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>deflate-wasm test page</title>
+  <style>
+    :root {
+      --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --border: #d0d0d0;
+      --panel: #f6f6f6; --ok: #1a7f37; --fail: #cf222e; --accent: #0969da;
+      color-scheme: light dark;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --border: #30363d;
+        --panel: #161b22; --ok: #3fb950; --fail: #f85149; --accent: #4493f8;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0 auto; max-width: 860px; padding: 24px 16px;
+      background: var(--bg); color: var(--fg);
+      font: 15px/1.5 system-ui, sans-serif;
+    }
+    h1 { font-size: 1.4rem; margin: 0 0 4px; }
+    h2 { font-size: 1.05rem; margin: 0 0 8px; }
+    p.lead { color: var(--muted); margin: 0 0 24px; }
+    section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    textarea { width: 100%; min-height: 110px; font: 13px ui-monospace, monospace; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+    button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    pre { margin: 12px 0 0; padding: 10px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; font: 13px/1.45 ui-monospace, monospace; min-height: 2.5em; }
+    .ok { color: var(--ok); } .fail { color: var(--fail); }
+    label { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>deflate-wasm test page</h1>
+  <p class="lead">Checks the built package in this browser. Run <code>npm run build</code> first, then <code>npm run serve</code>.</p>
+
+  <section>
+    <h2>1. Round trip with the browser's own compressor</h2>
+    <p>Compresses the text with <code>CompressionStream("deflate-raw")</code>, then decompresses it with this library and compares.</p>
+    <textarea id="text">The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog.</textarea>
+    <div class="row">
+      <button id="roundtrip" disabled>Compress + decompress</button>
+      <label><input type="number" id="repeat" value="1" min="1" max="100000" style="width: 7em"> × repeat text</label>
+    </div>
+    <pre id="roundtrip-out"></pre>
+  </section>
+
+  <section>
+    <h2>2. Decompress a raw DEFLATE file</h2>
+    <p>Pick a raw DEFLATE file, e.g. <code>tests/data/dynamic_text.deflate</code>.</p>
+    <div class="row"><input type="file" id="file" disabled></div>
+    <pre id="file-out"></pre>
+  </section>
+
+  <section>
+    <h2>3. Built-in checks</h2>
+    <div class="row"><button id="checks" disabled>Run checks</button></div>
+    <pre id="checks-out"></pre>
+  </section>
+
+  <script type="module">
+    import { init, decompress } from "../../dist/index.js";
+
+    const $ = (id) => document.getElementById(id);
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+
+    function show(el, text, cls) {
+      el.textContent = text;
+      el.className = cls ?? "";
+    }
+
+    async function compressRaw(bytes) {
+      const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+
+    function equal(a, b) {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+      return true;
+    }
+
+    function timed(fn) {
+      const start = performance.now();
+      const value = fn();
+      return [value, (performance.now() - start).toFixed(2)];
+    }
+
+    try {
+      const start = performance.now();
+      await init();
+      show($("checks-out"), `wasm loaded in ${(performance.now() - start).toFixed(1)} ms`);
+      for (const id of ["roundtrip", "file", "checks"]) $(id).disabled = false;
+    } catch (error) {
+      show($("checks-out"), `init() failed: ${error.message}\nDid you run "npm run build"?`, "fail");
+    }
+
+    $("roundtrip").addEventListener("click", async () => {
+      const out = $("roundtrip-out");
+      try {
+        const repeat = Math.max(1, Number($("repeat").value) || 1);
+        const input = encoder.encode($("text").value.repeat(repeat));
+        const compressed = await compressRaw(input);
+        const [output, ms] = timed(() => decompress(compressed));
+        const same = equal(output, input);
+        show(out,
+          `${same ? "match" : "MISMATCH"}\n` +
+          `input ${input.length} bytes -> compressed ${compressed.length} bytes -> decompressed ${output.length} bytes\n` +
+          `decompress took ${ms} ms`,
+          same ? "ok" : "fail");
+      } catch (error) {
+        show(out, `error: ${error.message}`, "fail");
+      }
+    });
+
+    $("file").addEventListener("change", async (event) => {
+      const out = $("file-out");
+      const file = event.target.files[0];
+      if (!file) return;
+      try {
+        const input = new Uint8Array(await file.arrayBuffer());
+        const [output, ms] = timed(() => decompress(input));
+        const preview = decoder.decode(output.subarray(0, 400));
+        show(out, `${file.name}: ${input.length} -> ${output.length} bytes in ${ms} ms\n\n${preview}${output.length > 400 ? "…" : ""}`, "ok");
+      } catch (error) {
+        show(out, `${file.name}: error: ${error.message}`, "fail");
+      }
+    });
+
+    $("checks").addEventListener("click", async () => {
+      const lines = [];
+      let failed = 0;
+
+      async function roundTrip(name, input) {
+        try {
+          const compressed = await compressRaw(input);
+          const [output, ms] = timed(() => decompress(compressed));
+          const ok = equal(output, input);
+          if (!ok) failed++;
+          lines.push(`${ok ? "ok  " : "FAIL"} ${name} (${input.length} -> ${compressed.length} bytes, ${ms} ms)`);
+        } catch (error) {
+          failed++;
+          lines.push(`FAIL ${name}: ${error.message}`);
+        }
+      }
+
+      const random = crypto.getRandomValues(new Uint8Array(65536));
+      const text = encoder.encode("lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(20000));
+
+      await roundTrip("empty", new Uint8Array(0));
+      await roundTrip("single byte", new Uint8Array([7]));
+      await roundTrip("64 KB random bytes", random);
+      await roundTrip("1 MB of one byte", new Uint8Array(1 << 20).fill(0x61));
+      await roundTrip("~1.1 MB repetitive text", text);
+
+      try {
+        decompress(new Uint8Array([0x07]));
+        failed++;
+        lines.push("FAIL corrupt input did not throw");
+      } catch (error) {
+        lines.push(`ok   corrupt input throws: "${error.message}"`);
+      }
+
+      try {
+        await roundTrip("still works after an error", encoder.encode("hello hello hello"));
+      } catch {}
+
+      lines.push("", failed ? `${failed} failed` : "all passed");
+      show($("checks-out"), lines.join("\n"), failed ? "fail" : "ok");
+    });
+  </script>
+</body>
+</html>

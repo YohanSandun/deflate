@@ -11,3 +11,25 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[lib]
+# cdylib for the wasm build, rlib so the integration tests can link against the crate.
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+# Smaller wasm global allocator than the default dlmalloc (see src/wasm.rs).
+talc = "5.1"
+
+[package.metadata.wasm-pack.profile.release]
+# Rust enables these wasm features by default (all browsers since ~2021, Node 16+);
+# wasm-opt has to be told about them or it rejects the module.
+wasm-opt = [
+    "-O3",
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "--enable-sign-ext",
+    "--enable-mutable-globals",
+    "--enable-multivalue",
+    "--enable-reference-types",
+]

@@ -15,10 +15,10 @@ static FIXED_DECODERS: LazyLock<(HuffmanDecoder, HuffmanDecoder)> = LazyLock::ne
     for i in 256..280 {
         lengths[i] = 7;
     }
-
+    
     (
-        HuffmanDecoder::new(&lengths).expect("fixed literal/length code is valid"),
-        HuffmanDecoder::new(&distance_length).expect("fixed distance code is valid"),
+        HuffmanDecoder::new(&lengths).unwrap_or_else(|_| unreachable!()),
+        HuffmanDecoder::new(&distance_length).unwrap_or_else(|_| unreachable!()),
     )
 });
 
