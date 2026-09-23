@@ -525,4 +525,73 @@ mod tests {
 
         assert_eq!(reader.read_next_bit(), Err("unexpected end of input".to_string()));
     }
+
+    #[test]
+    fn read_bytes_at_start() {
+        let data = [1, 2, 3, 4];
+        let mut reader = BitReader::new(&data);
+
+        assert_eq!(reader.read_bytes(3).unwrap(), &[1, 2, 3]);
+        assert_eq!(reader.read_next_bits(8).unwrap(), 4);
+    }
+
+    #[test]
+    fn read_bytes_after_bit_reads_and_align() {
+        let data = sample_data(40);
+        let mut reader = BitReader::new(&data);
+
+        // Bytes 0..3 are now sitting in the bit buffer; read_bytes must return them, not skip them.
+        reader.read_next_bits(13).unwrap();
+        reader.align_to_byte();
+
+        assert_eq!(reader.read_bytes(20).unwrap(), &data[2..22]);
+        assert_eq!(reader.read_next_bits(16).unwrap(), bits_at(&data, 22 * 8, 16));
+    }
+
+    #[test]
+    fn read_bytes_zero_bytes() {
+        let data = [0xAB];
+        let mut reader = BitReader::new(&data);
+
+        assert_eq!(reader.read_bytes(0).unwrap(), &[] as &[u8]);
+        assert_eq!(reader.read_next_bits(8).unwrap(), 0xAB);
+    }
+
+    #[test]
+    fn read_bytes_to_exact_end() {
+        let data = sample_data(20);
+        let mut reader = BitReader::new(&data);
+
+        reader.read_next_bits(8).unwrap();
+
+        assert_eq!(reader.read_bytes(19).unwrap(), &data[1..]);
+        assert_eq!(reader.read_next_bit(), Err("unexpected end of input".to_string()));
+    }
+
+    #[test]
+    fn read_bytes_past_end_fails_without_consuming() {
+        let data = [1, 2, 3];
+        let mut reader = BitReader::new(&data);
+
+        assert_eq!(reader.read_bytes(4), Err("unexpected end of input".to_string()));
+        assert_eq!(reader.read_bytes(3).unwrap(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn read_bytes_rejects_unaligned_reader() {
+        let data = [0xFF, 0xFF];
+        let mut reader = BitReader::new(&data);
+
+        reader.read_next_bits(3).unwrap();
+
+        assert_eq!(reader.read_bytes(1), Err("reader is not byte-aligned".to_string()));
+    }
+
+    #[test]
+    fn input_len_returns_input_size() {
+        let data = [0u8; 13];
+        let reader = BitReader::new(&data);
+
+        assert_eq!(reader.input_len(), 13);
+    }
 }

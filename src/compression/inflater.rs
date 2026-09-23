@@ -1,5 +1,28 @@
+use std::sync::LazyLock;
+
 use crate::io::bit_reader::{BitReader};
 use crate::compression::huffman_decoder::{HuffmanDecoder};
+
+// Built once per process and shared by every fixed block.
+static FIXED_DECODERS: LazyLock<(HuffmanDecoder, HuffmanDecoder)> = LazyLock::new(|| {
+    let mut lengths = [8u8; 288];
+    let distance_length = [5u8; 32];
+
+    for i in 144..256 {
+        lengths[i] = 9;
+    }
+
+    for i in 256..280 {
+        lengths[i] = 7;
+    }
+
+    (
+        HuffmanDecoder::new(&lengths).expect("fixed literal/length code is valid"),
+        HuffmanDecoder::new(&distance_length).expect("fixed distance code is valid"),
+    )
+});
+
+const MAX_INITIAL_CAPACITY: usize = 64 << 20;
 
 const LENGTH_BASE: [u16; 29] = [
     3, 4, 5, 6, 7, 8, 9, 10,
@@ -59,7 +82,8 @@ impl<'a> Inflater<'a> {
     }
 
     pub fn inflate(&mut self) -> Result<Vec<u8>, String> {
-        let mut inflated_data: Vec<u8> = Vec::new();
+        let capacity = self.reader.input_len().saturating_mul(4).min(MAX_INITIAL_CAPACITY);
+        let mut inflated_data: Vec<u8> = Vec::with_capacity(capacity);
 
         let mut b_final = 0u8;
         while b_final == 0 {
@@ -87,29 +111,15 @@ impl<'a> Inflater<'a> {
             return Err("corrupted stored block".to_string());
         }
 
-        for _ in 0..len {
-            inflated_data.push(self.reader.read_next_bits(8)? as u8);
-        }
+        inflated_data.extend_from_slice(self.reader.read_bytes(len as usize)?);
 
         Ok(())
     }
 
     fn inflate_fixed_huffman_block(&mut self, inflated_data: &mut Vec<u8>) -> Result<(), String> {
-        let mut lengths = [8u8; 288];
-        let distance_length = [5u8; 32];
+        let (literal_length_decoder, distance_decoder) = &*FIXED_DECODERS;
 
-        for i in 144..256 {
-            lengths[i] = 9;
-        }
-
-        for i in 256..280 {
-            lengths[i] = 7;
-        }
-
-        let literal_length_decoder = HuffmanDecoder::new(&lengths)?;
-        let distance_decoder = HuffmanDecoder::new(&distance_length)?;
-
-        self.inflate_block(&literal_length_decoder, &distance_decoder, inflated_data)?;
+        self.inflate_block(literal_length_decoder, distance_decoder, inflated_data)?;
 
         Ok(())
     }
@@ -176,10 +186,24 @@ impl<'a> Inflater<'a> {
             return Err("invalid distance: too far back".to_string());
         }
 
-        let pos = inflated_data.len() - distance as usize;
+        let length = length as usize;
+        let distance = distance as usize;
+        let pos = inflated_data.len() - distance;
 
-        for i in 0..length as usize {
-            inflated_data.push(inflated_data[pos + i]);
+        inflated_data.reserve(length);
+
+        if distance >= length {
+            inflated_data.extend_from_within(pos..pos + length);
+        } else if distance == 1 {
+            let byte = inflated_data[pos];
+            inflated_data.resize(inflated_data.len() + length, byte);
+        } else {
+            let mut copied = 0;
+            while copied < length {
+                let chunk = (inflated_data.len() - pos).min(length - copied);
+                inflated_data.extend_from_within(pos..pos + chunk);
+                copied += chunk;
+            }
         }
 
         Ok(())

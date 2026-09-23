@@ -17,6 +17,10 @@ impl<'a> BitReader<'a> {
         reader
     }
 
+    pub fn input_len(&self) -> usize {
+        self.data.len()
+    }
+
     #[inline]
     fn refill(&mut self) {
         if self.bit_count >= 32 {
@@ -80,6 +84,26 @@ impl<'a> BitReader<'a> {
         }
 
         Ok((self.bit_buf & ((1u64 << n) - 1)) as u32)
+    }
+
+    pub fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], String> {
+        if self.bit_count % 8 != 0 {
+            return Err("reader is not byte-aligned".to_string());
+        }
+        
+        let start = self.byte_pos - (self.bit_count / 8) as usize;
+
+        if n > self.data.len() - start {
+            return Err("unexpected end of input".to_string());
+        }
+
+        let data = self.data;
+        self.byte_pos = start + n;
+        self.bit_buf = 0;
+        self.bit_count = 0;
+        self.refill();
+
+        Ok(&data[start..start + n])
     }
 
     #[inline]
