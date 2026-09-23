@@ -65,4 +65,88 @@ mod tests {
         // A single distance code of length 1 is legal in DEFLATE.
         assert!(HuffmanDecoder::new(&[1]).is_ok());
     }
+
+    // Test-side encoder: canonical codes per RFC 1951, written MSB-first into an LSB-first stream.
+    fn encode(code_lengths: &[u8], symbols: &[usize]) -> Vec<u8> {
+        let mut bl_counts = [0u32; 16];
+        for &len in code_lengths {
+            if len > 0 {
+                bl_counts[len as usize] += 1;
+            }
+        }
+
+        let mut next_code = [0u32; 16];
+        let mut code = 0;
+        for bits in 1..16 {
+            code = (code + bl_counts[bits - 1]) << 1;
+            next_code[bits] = code;
+        }
+
+        let mut codes = vec![0u32; code_lengths.len()];
+        for (symbol, &len) in code_lengths.iter().enumerate() {
+            if len > 0 {
+                codes[symbol] = next_code[len as usize];
+                next_code[len as usize] += 1;
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut bit_pos = 0;
+        for &symbol in symbols {
+            let len = code_lengths[symbol];
+            for k in (0..len).rev() {
+                if bit_pos % 8 == 0 {
+                    out.push(0);
+                }
+                *out.last_mut().unwrap() |= (((codes[symbol] >> k) & 1) as u8) << (bit_pos % 8);
+                bit_pos += 1;
+            }
+        }
+
+        out
+    }
+
+    #[test]
+    fn round_trips_every_symbol_across_many_secondary_tables() {
+        // 3 short codes + 255 ten-bit + 2 eleven-bit codes (a complete code).
+        // The long codes spread over 128 different primary prefixes.
+        let mut lengths = vec![2u8, 2, 2];
+        lengths.extend(std::iter::repeat_n(10u8, 255));
+        lengths.extend([11u8, 11]);
+
+        let decoder = HuffmanDecoder::new(&lengths).unwrap();
+
+        let symbols: Vec<usize> = (0..lengths.len()).chain((0..lengths.len()).rev()).collect();
+        let data = encode(&lengths, &symbols);
+        let mut reader = BitReader::new(&data);
+
+        for &expected in &symbols {
+            assert_eq!(decoder.decode(&mut reader).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn round_trips_fifteen_bit_codes() {
+        let lengths = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15];
+
+        let decoder = HuffmanDecoder::new(&lengths).unwrap();
+
+        let symbols: Vec<usize> = (0..lengths.len()).rev().collect();
+        let data = encode(&lengths, &symbols);
+        let mut reader = BitReader::new(&data);
+
+        for &expected in &symbols {
+            assert_eq!(decoder.decode(&mut reader).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_unused_code_in_incomplete_table() {
+        // Only code "0" exists; a 1 bit must be rejected.
+        let decoder = HuffmanDecoder::new(&[1]).unwrap();
+        let data = [0b00000001];
+        let mut reader = BitReader::new(&data);
+
+        assert_eq!(decoder.decode(&mut reader), Err("invalid Huffman code".to_string()));
+    }
 }

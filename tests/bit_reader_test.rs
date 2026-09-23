@@ -270,3 +270,77 @@ fn peek_next_bits_on_empty_input_returns_zero() {
 
     assert_eq!(reader.peek_next_bits(9).unwrap(), 0);
 }
+
+// Reference: bit `i` of the stream, LSB first.
+fn bit_at(data: &[u8], i: usize) -> u32 {
+    ((data[i / 8] >> (i % 8)) & 1) as u32
+}
+
+fn bits_at(data: &[u8], start: usize, n: usize) -> u32 {
+    (0..n).fold(0, |acc, k| acc | (bit_at(data, start + k) << k))
+}
+
+fn sample_data(len: usize) -> Vec<u8> {
+    // Deterministic pseudo-random bytes so reads cross refill boundaries with varied values.
+    let mut x = 0x2545F491u32;
+    (0..len).map(|_| { x ^= x << 13; x ^= x >> 17; x ^= x << 5; x as u8 }).collect()
+}
+
+#[test]
+fn mixed_reads_across_refills_match_reference() {
+    let data = sample_data(64);
+    let mut reader = BitReader::new(&data);
+    let widths = [1, 3, 7, 9, 13, 15, 16, 32, 5, 2, 31, 8];
+
+    let mut pos = 0;
+    for &n in widths.iter().cycle() {
+        if pos + n > data.len() * 8 {
+            break;
+        }
+
+        assert_eq!(reader.peek_next_bits(n as u32).unwrap(), bits_at(&data, pos, n), "peek at bit {pos}");
+        assert_eq!(reader.read_next_bits(n as u32).unwrap(), bits_at(&data, pos, n), "read at bit {pos}");
+        pos += n;
+    }
+}
+
+#[test]
+fn skip_bits_past_buffer_lands_on_correct_bit() {
+    let data = sample_data(64);
+    let mut reader = BitReader::new(&data);
+
+    reader.read_next_bits(3).unwrap();
+    reader.skip_bits(200).unwrap();
+
+    assert_eq!(reader.read_next_bits(16).unwrap(), bits_at(&data, 203, 16));
+}
+
+#[test]
+fn skip_bits_to_exact_end_then_read_fails() {
+    let data = sample_data(20);
+    let mut reader = BitReader::new(&data);
+
+    reader.skip_bits(20 * 8).unwrap();
+
+    assert_eq!(reader.read_next_bit(), Err("unexpected end of input".to_string()));
+}
+
+#[test]
+fn skip_bits_past_end_fails() {
+    let data = sample_data(20);
+    let mut reader = BitReader::new(&data);
+
+    assert_eq!(reader.skip_bits(20 * 8 + 1), Err("unexpected end of input".to_string()));
+}
+
+#[test]
+fn align_to_byte_after_refill_lands_on_next_byte() {
+    let data = sample_data(32);
+    let mut reader = BitReader::new(&data);
+
+    reader.read_next_bits(32).unwrap();
+    reader.read_next_bits(29).unwrap();
+    reader.align_to_byte();
+
+    assert_eq!(reader.read_next_bits(8).unwrap(), data[8] as u32);
+}
