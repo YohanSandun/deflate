@@ -1,8 +1,8 @@
 use std::sync::LazyLock;
 
-use crate::io::bit_reader::{BitReader};
 use crate::Error;
 use crate::compression::huffman_decoder::{Alphabet, Entry, HuffmanDecoder};
+use crate::io::bit_reader::BitReader;
 
 // Built once per process and shared by every fixed block.
 static FIXED_DECODERS: LazyLock<(HuffmanDecoder, HuffmanDecoder)> = LazyLock::new(|| {
@@ -16,10 +16,12 @@ static FIXED_DECODERS: LazyLock<(HuffmanDecoder, HuffmanDecoder)> = LazyLock::ne
     for i in 256..280 {
         lengths[i] = 7;
     }
-    
+
     (
-        HuffmanDecoder::new_for(&lengths, Alphabet::LiteralLength).unwrap_or_else(|_| unreachable!()),
-        HuffmanDecoder::new_for(&distance_length, Alphabet::Distance).unwrap_or_else(|_| unreachable!()),
+        HuffmanDecoder::new_for(&lengths, Alphabet::LiteralLength)
+            .unwrap_or_else(|_| unreachable!()),
+        HuffmanDecoder::new_for(&distance_length, Alphabet::Distance)
+            .unwrap_or_else(|_| unreachable!()),
     )
 });
 
@@ -28,7 +30,7 @@ const MAX_INITIAL_CAPACITY: usize = 64 << 20;
 const OUTPUT_SLACK: usize = 258 + 8;
 
 const CODE_LENGTH_ORDER: [usize; 19] = [
-    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 
 const MAX_LITERAL_LENGTH_CODES: usize = 286;
@@ -52,7 +54,11 @@ impl<'a> Inflater<'a> {
     }
 
     pub fn inflate(&mut self) -> Result<Vec<u8>, Error> {
-        let capacity = self.reader.input_len().saturating_mul(4).min(MAX_INITIAL_CAPACITY);
+        let capacity = self
+            .reader
+            .input_len()
+            .saturating_mul(4)
+            .min(MAX_INITIAL_CAPACITY);
         let mut inflated_data: Vec<u8> = Vec::with_capacity(capacity);
 
         let mut b_final = 0u8;
@@ -64,7 +70,7 @@ impl<'a> Inflater<'a> {
                 0 => self.inflate_stored_block(&mut inflated_data)?,
                 1 => self.inflate_fixed_huffman_block(&mut inflated_data)?,
                 2 => self.inflate_dynamic_huffman_block(&mut inflated_data)?,
-                _ => return Err(Error::InvalidBlockType)
+                _ => return Err(Error::InvalidBlockType),
             }
         }
 
@@ -89,7 +95,12 @@ impl<'a> Inflater<'a> {
     fn inflate_fixed_huffman_block(&mut self, inflated_data: &mut Vec<u8>) -> Result<(), Error> {
         let (literal_length_decoder, distance_decoder) = &*FIXED_DECODERS;
 
-        Self::inflate_block(&mut self.reader, literal_length_decoder, distance_decoder, inflated_data)?;
+        Self::inflate_block(
+            &mut self.reader,
+            literal_length_decoder,
+            distance_decoder,
+            inflated_data,
+        )?;
 
         Ok(())
     }
@@ -109,7 +120,8 @@ impl<'a> Inflater<'a> {
             code_length_code_lengths[symbol] = self.reader.read_next_bits(3)? as u8;
         }
 
-        self.code_length_decoder.rebuild(&code_length_code_lengths)?;
+        self.code_length_decoder
+            .rebuild(&code_length_code_lengths)?;
 
         let mut code_lengths = [0u8; MAX_LITERAL_LENGTH_CODES + MAX_DISTANCE_CODES];
         let total = hlit + hdist;
@@ -119,21 +131,33 @@ impl<'a> Inflater<'a> {
             index = self.decode_code_length(&mut code_lengths[..total], index)?;
         }
 
-        let (literal_length_code_lengths, distance_code_lengths) = code_lengths[..total].split_at(hlit);
+        let (literal_length_code_lengths, distance_code_lengths) =
+            code_lengths[..total].split_at(hlit);
 
         if literal_length_code_lengths[256] == 0 {
             return Err(Error::MissingEndOfBlockCode);
         }
 
-        self.literal_length_decoder.rebuild_for(literal_length_code_lengths, Alphabet::LiteralLength)?;
-        self.distance_decoder.rebuild_for(distance_code_lengths, Alphabet::Distance)?;
+        self.literal_length_decoder
+            .rebuild_for(literal_length_code_lengths, Alphabet::LiteralLength)?;
+        self.distance_decoder
+            .rebuild_for(distance_code_lengths, Alphabet::Distance)?;
 
-        Self::inflate_block(&mut self.reader, &self.literal_length_decoder, &self.distance_decoder, inflated_data)?;
+        Self::inflate_block(
+            &mut self.reader,
+            &self.literal_length_decoder,
+            &self.distance_decoder,
+            inflated_data,
+        )?;
 
         Ok(())
     }
 
-    fn decode_code_length(&mut self, code_lengths: &mut [u8], index: usize) -> Result<usize, Error> {
+    fn decode_code_length(
+        &mut self,
+        code_lengths: &mut [u8],
+        index: usize,
+    ) -> Result<usize, Error> {
         let symbol = self.code_length_decoder.decode(&mut self.reader)?;
 
         let (code_length, repeat) = match symbol {
@@ -142,7 +166,10 @@ impl<'a> Inflater<'a> {
                 if index == 0 {
                     return Err(Error::RepeatWithoutPreviousLength);
                 }
-                (code_lengths[index - 1], self.reader.read_next_bits(2)? as usize + 3)
+                (
+                    code_lengths[index - 1],
+                    self.reader.read_next_bits(2)? as usize + 3,
+                )
             }
             17 => (0, self.reader.read_next_bits(3)? as usize + 3),
             18 => (0, self.reader.read_next_bits(7)? as usize + 11),
@@ -158,21 +185,48 @@ impl<'a> Inflater<'a> {
         Ok(index + repeat)
     }
 
-    fn inflate_block(reader: &mut BitReader, literal_length_decoder: &HuffmanDecoder, distance_decoder: &HuffmanDecoder, inflated_data: &mut Vec<u8>) -> Result<(), Error> {
-        let result = Self::decode_symbols(reader, literal_length_decoder, distance_decoder, inflated_data);
+    fn inflate_block(
+        reader: &mut BitReader,
+        literal_length_decoder: &HuffmanDecoder,
+        distance_decoder: &HuffmanDecoder,
+        inflated_data: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        let result = Self::decode_symbols(
+            reader,
+            literal_length_decoder,
+            distance_decoder,
+            inflated_data,
+        );
         reader.finish_buffered();
         result
     }
 
-    fn decode_symbols(reader: &mut BitReader, literal_length_decoder: &HuffmanDecoder, distance_decoder: &HuffmanDecoder, inflated_data: &mut Vec<u8>) -> Result<(), Error> {
+    fn decode_symbols(
+        reader: &mut BitReader,
+        literal_length_decoder: &HuffmanDecoder,
+        distance_decoder: &HuffmanDecoder,
+        inflated_data: &mut Vec<u8>,
+    ) -> Result<(), Error> {
         let mut pos = inflated_data.len();
-        let result = Self::decode_symbols_into(reader, literal_length_decoder, distance_decoder, inflated_data, &mut pos);
+        let result = Self::decode_symbols_into(
+            reader,
+            literal_length_decoder,
+            distance_decoder,
+            inflated_data,
+            &mut pos,
+        );
         inflated_data.truncate(pos);
         result
     }
 
     #[inline(always)]
-    fn decode_symbols_into(reader: &mut BitReader, literal_length_decoder: &HuffmanDecoder, distance_decoder: &HuffmanDecoder, out: &mut Vec<u8>, pos: &mut usize) -> Result<(), Error> {
+    fn decode_symbols_into(
+        reader: &mut BitReader,
+        literal_length_decoder: &HuffmanDecoder,
+        distance_decoder: &HuffmanDecoder,
+        out: &mut Vec<u8>,
+        pos: &mut usize,
+    ) -> Result<(), Error> {
         loop {
             if out.len() - *pos < OUTPUT_SLACK {
                 Self::grow_output(out, *pos);
@@ -232,7 +286,9 @@ impl<'a> Inflater<'a> {
 
     #[cold]
     fn grow_output(out: &mut Vec<u8>, pos: usize) {
-        let new_len = (pos + 64 * 1024).min(out.capacity()).max(pos + OUTPUT_SLACK);
+        let new_len = (pos + 64 * 1024)
+            .min(out.capacity())
+            .max(pos + OUTPUT_SLACK);
         out.resize(new_len, 0);
     }
 

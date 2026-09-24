@@ -1,5 +1,5 @@
-use crate::io::bit_reader::BitReader;
 use crate::Error;
+use crate::io::bit_reader::BitReader;
 
 #[cfg(test)]
 mod tests {
@@ -64,14 +64,9 @@ mod tests {
         let data = [0b10110001];
         let mut reader = BitReader::new(&data);
 
-        let bits: Vec<u8> = (0..8)
-            .map(|_| reader.read_next_bit().unwrap())
-            .collect();
+        let bits: Vec<u8> = (0..8).map(|_| reader.read_next_bit().unwrap()).collect();
 
-        assert_eq!(
-            bits,
-            vec![1, 0, 0, 0, 1, 1, 0, 1]
-        );
+        assert_eq!(bits, vec![1, 0, 0, 0, 1, 1, 0, 1]);
     }
 
     #[test]
@@ -98,10 +93,7 @@ mod tests {
 
         let result = reader.read_next_bit();
 
-        assert_eq!(
-            result,
-            Err(Error::UnexpectedEndOfInput)
-        );
+        assert_eq!(result, Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -114,10 +106,7 @@ mod tests {
             assert!(reader.read_next_bit().is_ok());
         }
 
-        assert_eq!(
-            reader.read_next_bit(),
-            Err(Error::UnexpectedEndOfInput)
-        );
+        assert_eq!(reader.read_next_bit(), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -195,10 +184,7 @@ mod tests {
         let data: [u8; 0] = [];
         let mut reader = BitReader::new(&data);
 
-        assert_eq!(
-            reader.read_next_bits(1),
-            Err(Error::UnexpectedEndOfInput)
-        );
+        assert_eq!(reader.read_next_bits(1), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -207,10 +193,7 @@ mod tests {
         let mut reader = BitReader::new(&data);
 
         // Only 8 bits available, asking for 9.
-        assert_eq!(
-            reader.read_next_bits(9),
-            Err(Error::UnexpectedEndOfInput)
-        );
+        assert_eq!(reader.read_next_bits(9), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -220,10 +203,7 @@ mod tests {
 
         reader.read_next_bits(8).unwrap();
 
-        assert_eq!(
-            reader.read_next_bits(1),
-            Err(Error::UnexpectedEndOfInput)
-        );
+        assert_eq!(reader.read_next_bits(1), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -273,7 +253,14 @@ mod tests {
     fn sample_data(len: usize) -> Vec<u8> {
         // Deterministic pseudo-random bytes so reads cross refill boundaries with varied values.
         let mut x = 0x2545F491u32;
-        (0..len).map(|_| { x ^= x << 13; x ^= x >> 17; x ^= x << 5; x as u8 }).collect()
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect()
     }
 
     #[test]
@@ -288,8 +275,16 @@ mod tests {
                 break;
             }
 
-            assert_eq!(reader.peek_next_bits(n as u32), bits_at(&data, pos, n), "peek at bit {pos}");
-            assert_eq!(reader.read_next_bits(n as u32).unwrap(), bits_at(&data, pos, n), "read at bit {pos}");
+            assert_eq!(
+                reader.peek_next_bits(n as u32),
+                bits_at(&data, pos, n),
+                "peek at bit {pos}"
+            );
+            assert_eq!(
+                reader.read_next_bits(n as u32).unwrap(),
+                bits_at(&data, pos, n),
+                "read at bit {pos}"
+            );
             pos += n;
         }
     }
@@ -320,7 +315,10 @@ mod tests {
         let data = sample_data(20);
         let mut reader = BitReader::new(&data);
 
-        assert_eq!(reader.skip_bits(20 * 8 + 1), Err(Error::UnexpectedEndOfInput));
+        assert_eq!(
+            reader.skip_bits(20 * 8 + 1),
+            Err(Error::UnexpectedEndOfInput)
+        );
     }
 
     #[test]
@@ -421,13 +419,28 @@ mod tests {
 
                     if start + n <= total_bits {
                         let expected = bits_at(&data, start, n);
-                        assert_eq!(reader.peek_next_bits(n as u32), expected, "peek len={len} start={start} n={n}");
-                        assert_eq!(reader.read_next_bits(n as u32).unwrap(), expected, "read len={len} start={start} n={n}");
+                        assert_eq!(
+                            reader.peek_next_bits(n as u32),
+                            expected,
+                            "peek len={len} start={start} n={n}"
+                        );
+                        assert_eq!(
+                            reader.read_next_bits(n as u32).unwrap(),
+                            expected,
+                            "read len={len} start={start} n={n}"
+                        );
                     } else {
                         let available = total_bits - start;
                         let expected = bits_at(&data, start, available);
-                        assert_eq!(reader.peek_next_bits(n as u32), expected, "padded peek len={len} start={start} n={n}");
-                        assert!(reader.read_next_bits(n as u32).is_err(), "read past end len={len} start={start} n={n}");
+                        assert_eq!(
+                            reader.peek_next_bits(n as u32),
+                            expected,
+                            "padded peek len={len} start={start} n={n}"
+                        );
+                        assert!(
+                            reader.read_next_bits(n as u32).is_err(),
+                            "read past end len={len} start={start} n={n}"
+                        );
                     }
                 }
             }
@@ -529,7 +542,10 @@ mod tests {
         reader.align_to_byte();
 
         assert_eq!(reader.read_bytes(20).unwrap(), &data[2..22]);
-        assert_eq!(reader.read_next_bits(16).unwrap(), bits_at(&data, 22 * 8, 16));
+        assert_eq!(
+            reader.read_next_bits(16).unwrap(),
+            bits_at(&data, 22 * 8, 16)
+        );
     }
 
     #[test]

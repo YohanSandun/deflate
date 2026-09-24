@@ -1,6 +1,6 @@
+use crate::Error;
 use crate::compression::huffman_decoder::HuffmanDecoder;
 use crate::io::bit_reader::BitReader;
-use crate::Error;
 
 #[cfg(test)]
 mod tests {
@@ -42,7 +42,10 @@ mod tests {
             assert_eq!(decoder.decode(&mut reader).unwrap(), 1);
         }
 
-        assert_eq!(decoder.decode(&mut reader), Err(Error::UnexpectedEndOfInput));
+        assert_eq!(
+            decoder.decode(&mut reader),
+            Err(Error::UnexpectedEndOfInput)
+        );
     }
 
     #[test]
@@ -203,10 +206,7 @@ mod tests {
     fn rebuild_failure_leaves_decoder_unchanged() {
         let mut decoder = HuffmanDecoder::new(&[1, 2, 2]).unwrap();
 
-        assert_eq!(
-            decoder.rebuild(&[1, 1, 1]),
-            Err(Error::OverSubscribedCode)
-        );
+        assert_eq!(decoder.rebuild(&[1, 1, 1]), Err(Error::OverSubscribedCode));
 
         let data = [0b00011010];
         let mut reader = BitReader::new(&data);

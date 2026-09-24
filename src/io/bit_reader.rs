@@ -116,7 +116,7 @@ impl<'a> BitReader<'a> {
 
         Ok(value)
     }
-    
+
     #[inline]
     pub(crate) fn finish_buffered(&mut self) {
         self.refill();
@@ -125,7 +125,7 @@ impl<'a> BitReader<'a> {
     pub fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
         // Internal API: only called right after align_to_byte.
         assert!(self.bit_count % 8 == 0, "reader is not byte-aligned");
-        
+
         let start = self.byte_pos - (self.bit_count / 8) as usize;
 
         if n > self.data.len() - start {

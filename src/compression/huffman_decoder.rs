@@ -1,6 +1,8 @@
-use crate::compression::tables::{DISTANCE_BASE, DISTANCE_EXTRA_BITS, LENGTH_BASE, LENGTH_EXTRA_BITS};
-use crate::io::bit_reader::BitReader;
 use crate::Error;
+use crate::compression::tables::{
+    DISTANCE_BASE, DISTANCE_EXTRA_BITS, LENGTH_BASE, LENGTH_EXTRA_BITS,
+};
+use crate::io::bit_reader::BitReader;
 
 const MAX_BITS: usize = 15;
 const TABLE_BITS: usize = 9;
@@ -100,11 +102,18 @@ impl HuffmanDecoder {
         self.rebuild_for(code_lengths, Alphabet::Symbols)
     }
 
-    pub(crate) fn rebuild_for(&mut self, code_lengths: &[u8], alphabet: Alphabet) -> Result<(), Error> {
+    pub(crate) fn rebuild_for(
+        &mut self,
+        code_lengths: &[u8],
+        alphabet: Alphabet,
+    ) -> Result<(), Error> {
         let mut bl_counts = [0u16; MAX_BITS + 1];
         for code_length in code_lengths {
             // Code lengths come from 3-bit fields or symbols 0..=15, so never exceed 15.
-            assert!(*code_length as usize <= MAX_BITS, "invalid Huffman code length");
+            assert!(
+                *code_length as usize <= MAX_BITS,
+                "invalid Huffman code length"
+            );
 
             if *code_length > 0 {
                 bl_counts[*code_length as usize] += 1;
@@ -160,11 +169,21 @@ impl HuffmanDecoder {
             Alphabet::LiteralLength => match symbol {
                 0..=255 => Entry::new(Entry::LITERAL, bits, 0, symbol as u16),
                 256 => Entry::new(Entry::END_OF_BLOCK, bits, 0, 0),
-                257..=285 => Entry::new(Entry::BASE, bits, LENGTH_EXTRA_BITS[symbol - 257], LENGTH_BASE[symbol - 257]),
+                257..=285 => Entry::new(
+                    Entry::BASE,
+                    bits,
+                    LENGTH_EXTRA_BITS[symbol - 257],
+                    LENGTH_BASE[symbol - 257],
+                ),
                 _ => Entry::new(Entry::BAD_LENGTH, bits, 0, 0),
             },
             Alphabet::Distance => match symbol {
-                0..=29 => Entry::new(Entry::BASE, bits, DISTANCE_EXTRA_BITS[symbol], DISTANCE_BASE[symbol]),
+                0..=29 => Entry::new(
+                    Entry::BASE,
+                    bits,
+                    DISTANCE_EXTRA_BITS[symbol],
+                    DISTANCE_BASE[symbol],
+                ),
                 _ => Entry::new(Entry::BAD_DISTANCE, bits, 0, 0),
             },
         }
@@ -175,7 +194,11 @@ impl HuffmanDecoder {
         code.reverse_bits() >> (16 - length)
     }
 
-    fn allocate_secondary_tables(&mut self, code_lengths: &[u8], mut next_code: [u16; MAX_BITS + 1]) {
+    fn allocate_secondary_tables(
+        &mut self,
+        code_lengths: &[u8],
+        mut next_code: [u16; MAX_BITS + 1],
+    ) {
         let mut max_bits = [0u8; TABLE_SIZE];
 
         for &code_length in code_lengths {
@@ -189,7 +212,8 @@ impl HuffmanDecoder {
             next_code[bits] += 1;
 
             if bits > TABLE_BITS {
-                let primary_index = Self::reverse_bits(canonical_code, bits) as usize & (TABLE_SIZE - 1);
+                let primary_index =
+                    Self::reverse_bits(canonical_code, bits) as usize & (TABLE_SIZE - 1);
                 max_bits[primary_index] = max_bits[primary_index].max(code_length);
             }
         }
@@ -202,8 +226,10 @@ impl HuffmanDecoder {
             let secondary_bits = max_bits[primary_index] as usize - TABLE_BITS;
             let offset = self.secondary.len();
 
-            self.secondary.resize(offset + (1 << secondary_bits), Entry::INVALID_ENTRY);
-            self.table[primary_index] = Entry::new(Entry::SECONDARY, secondary_bits, 0, offset as u16);
+            self.secondary
+                .resize(offset + (1 << secondary_bits), Entry::INVALID_ENTRY);
+            self.table[primary_index] =
+                Entry::new(Entry::SECONDARY, secondary_bits, 0, offset as u16);
         }
     }
 
