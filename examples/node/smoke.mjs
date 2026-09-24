@@ -1,8 +1,9 @@
 // Node.js smoke test for the built package: `npm run build`, then `npm run test:node`.
-// Compresses inputs with node:zlib (raw deflate) and checks decompress() gives them back.
+// Compresses inputs with node:zlib (raw deflate) and checks decompress() and
+// decompressView() give them back.
 import { deflateRawSync, constants } from "node:zlib";
 import { readFile } from "node:fs/promises";
-import { init, decompress } from "../../dist/index.js";
+import { init, decompress, decompressView } from "../../dist/index.js";
 
 await init();
 
@@ -22,11 +23,37 @@ function check(name, input, options) {
   }
 
   const ms = (performance.now() - start).toFixed(2);
-  if (Buffer.compare(Buffer.from(output), Buffer.from(input)) === 0) {
+  const view = decompressView(compressed);
+  const viewMatches = view.length === input.length && equal(view.bytes, input);
+  view.free();
+
+  if (equal(output, input) && viewMatches) {
     console.log(`ok   ${name} (${input.length} -> ${compressed.length} bytes, ${ms} ms)`);
   } else {
     failures++;
-    console.log(`FAIL ${name}: output differs (${output.length} vs ${input.length} bytes)`);
+    console.log(`FAIL ${name}: output differs (copy ${equal(output, input) ? "ok" : "wrong"}, view ${viewMatches ? "ok" : "wrong"})`);
+  }
+}
+
+function equal(a, b) {
+  return Buffer.compare(Buffer.from(a.buffer, a.byteOffset, a.length), Buffer.from(b.buffer, b.byteOffset, b.length)) === 0;
+}
+
+function expect(name, condition) {
+  if (condition) {
+    console.log(`ok   ${name}`);
+  } else {
+    failures++;
+    console.log(`FAIL ${name}`);
+  }
+}
+
+function throws(fn) {
+  try {
+    fn();
+    return false;
+  } catch {
+    return true;
   }
 }
 
@@ -50,6 +77,39 @@ try {
   console.log("FAIL corrupt input: did not throw");
 } catch (error) {
   console.log(`ok   corrupt input throws: "${error.message}"`);
+}
+
+// decompressView specifics.
+{
+  const small = deflateRawSync(text);
+  const view = decompressView(small);
+  const before = view.bytes;
+
+  // Decompressing ~50 MB makes wasm memory grow, which detaches `before`.
+  const huge = deflateRawSync(Buffer.concat(Array(450).fill(text)));
+  decompressView(huge).free();
+
+  expect("view: memory growth detaches old arrays", before.length === 0);
+  expect("view: .bytes is valid again after memory growth", equal(view.bytes, text));
+  expect("view: toUint8Array copy survives free()", (() => {
+    const copy = view.toUint8Array();
+    view.free();
+    return equal(copy, text) && view.freed;
+  })());
+  expect("view: .bytes throws after free()", throws(() => view.bytes));
+  expect("view: free() twice is safe", !throws(() => view.free()));
+  expect("view: corrupt input throws", throws(() => decompressView(new Uint8Array([0x07]))));
+  expect("view: empty output", (() => {
+    const empty = decompressView(deflateRawSync(new Uint8Array(0)));
+    const ok = empty.length === 0 && empty.bytes.length === 0;
+    empty.free();
+    return ok;
+  })());
+  expect("view: Symbol.dispose frees it", (() => {
+    const disposable = decompressView(small);
+    disposable[Symbol.dispose]();
+    return disposable.freed;
+  })());
 }
 
 if (failures > 0) {

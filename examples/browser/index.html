@@ -64,7 +64,7 @@
   </section>
 
   <script type="module">
-    import { init, decompress } from "../../dist/index.js";
+    import { init, decompress, decompressView } from "../../dist/index.js";
 
     const $ = (id) => document.getElementById(id);
     const encoder = new TextEncoder();
@@ -141,9 +141,11 @@
         try {
           const compressed = await compressRaw(input);
           const [output, ms] = timed(() => decompress(compressed));
-          const ok = equal(output, input);
+          const view = decompressView(compressed);
+          const ok = equal(output, input) && equal(view.bytes, input);
+          view.free();
           if (!ok) failed++;
-          lines.push(`${ok ? "ok  " : "FAIL"} ${name} (${input.length} -> ${compressed.length} bytes, ${ms} ms)`);
+          lines.push(`${ok ? "ok  " : "FAIL"} ${name} (${input.length} -> ${compressed.length} bytes, ${ms} ms; copy + view)`);
         } catch (error) {
           failed++;
           lines.push(`FAIL ${name}: ${error.message}`);
@@ -170,6 +172,19 @@
       try {
         await roundTrip("still works after an error", encoder.encode("hello hello hello"));
       } catch {}
+
+      try {
+        const view = decompressView(await compressRaw(text));
+        const before = view.bytes;
+        decompressView(await compressRaw(encoder.encode("x".repeat(1 << 20).repeat(40)))).free();
+        const ok = equal(view.bytes, text);
+        view.free();
+        if (!ok) failed++;
+        lines.push(`${ok ? "ok  " : "FAIL"} view still correct after wasm memory growth (old array length now ${before.length})`);
+      } catch (error) {
+        failed++;
+        lines.push(`FAIL view after memory growth: ${error.message}`);
+      }
 
       lines.push("", failed ? `${failed} failed` : "all passed");
       show($("checks-out"), lines.join("\n"), failed ? "fail" : "ok");
