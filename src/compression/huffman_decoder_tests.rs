@@ -1,5 +1,5 @@
 use crate::Error;
-use crate::compression::huffman_decoder::HuffmanDecoder;
+use crate::compression::huffman_decoder::{Alphabet, Entry, HuffmanDecoder};
 use crate::io::bit_reader::BitReader;
 
 #[cfg(test)]
@@ -214,5 +214,122 @@ mod tests {
         assert_eq!(decoder.decode(&mut reader).unwrap(), 0);
         assert_eq!(decoder.decode(&mut reader).unwrap(), 1);
         assert_eq!(decoder.decode(&mut reader).unwrap(), 2);
+    }
+
+    // Literal/length lengths giving 'a' = 00, 'b' = 01, 'c' = 10, end of block = 11.
+    fn two_bit_literal_lengths() -> [u8; 257] {
+        let mut lengths = [0u8; 257];
+        lengths[b'a' as usize] = 2;
+        lengths[b'b' as usize] = 2;
+        lengths[b'c' as usize] = 2;
+        lengths[256] = 2;
+        lengths
+    }
+
+    #[test]
+    fn two_short_literals_share_one_entry() {
+        let decoder =
+            HuffmanDecoder::new_for(&two_bit_literal_lengths(), Alphabet::LiteralLength).unwrap();
+
+        // Stream bits (LSB first): 'a' = 0 0, then 'b' = 0 1.
+        let entry = decoder.lookup(0b1000);
+
+        assert_eq!(entry.kind(), Entry::LITERAL);
+        assert_eq!(entry.extra_bits(), 2, "two literals");
+        assert_eq!(entry.code_length(), 4, "both codes consumed");
+        assert_eq!(entry.value(), u32::from(b'a') | u32::from(b'b') << 8);
+    }
+
+    #[test]
+    fn literal_followed_by_non_literal_stays_single() {
+        let decoder =
+            HuffmanDecoder::new_for(&two_bit_literal_lengths(), Alphabet::LiteralLength).unwrap();
+
+        // 'a' = 0 0, then end of block = 1 1: only the literal goes in the entry.
+        let entry = decoder.lookup(0b1100);
+
+        assert_eq!(entry.kind(), Entry::LITERAL);
+        assert_eq!(entry.extra_bits(), 1);
+        assert_eq!(entry.code_length(), 2);
+        assert_eq!(entry.value(), u32::from(b'a'));
+    }
+
+    #[test]
+    fn literals_too_long_to_pair_stay_single() {
+        // 32 literals with 5-bit codes: two of them need 10 bits, more than the
+        // 9-bit primary table can see.
+        let mut lengths = [0u8; 257];
+        lengths[..32].fill(5);
+        lengths[256] = 0;
+
+        let decoder = HuffmanDecoder::new_for(&lengths, Alphabet::LiteralLength).unwrap();
+
+        for index in 0..512u64 {
+            let entry = decoder.lookup(index);
+            assert_eq!(entry.extra_bits(), 1, "index {index}");
+            assert_eq!(entry.code_length(), 5, "index {index}");
+        }
+    }
+
+    #[test]
+    fn every_pair_entry_matches_two_single_lookups() {
+        // A realistic literal/length table, checked
+        // entry by entry: a pair must decode exactly like two separate lookups.
+        let mut lengths = [0u8; 286];
+        for (symbol, length) in lengths.iter_mut().enumerate() {
+            *length = match symbol {
+                32 | 101 | 116 => 4, // ' ', 'e', 't'
+                97..=122 => 6,
+                32..=126 => 8,
+                256 => 7,
+                257..=264 => 7,
+                _ => 0,
+            };
+        }
+        // Make the code valid (not over-subscribed) by dropping symbols until it fits.
+        while HuffmanDecoder::new_for(&lengths, Alphabet::LiteralLength).is_err() {
+            let last = lengths.iter().rposition(|&l| l == 8).unwrap();
+            lengths[last] = 0;
+        }
+
+        let pairs = HuffmanDecoder::new_for(&lengths, Alphabet::LiteralLength).unwrap();
+        let singles = HuffmanDecoder::new(&lengths).unwrap();
+
+        let mut pair_count = 0;
+        for index in 0..512u64 {
+            let entry = pairs.lookup(index);
+            if entry.kind() != Entry::LITERAL || entry.extra_bits() != 2 {
+                continue;
+            }
+            pair_count += 1;
+
+            let first = singles.lookup(index);
+            let second = singles.lookup(index >> first.code_length());
+
+            assert_eq!(entry.value() & 0xFF, first.value(), "index {index}");
+            assert_eq!(entry.value() >> 8, second.value(), "index {index}");
+            assert_eq!(
+                entry.code_length(),
+                first.code_length() + second.code_length(),
+                "index {index}"
+            );
+            assert!(entry.code_length() <= 9, "index {index}");
+        }
+        assert!(
+            pair_count > 0,
+            "expected some pairs with 4-bit codes present"
+        );
+    }
+
+    #[test]
+    fn only_literal_length_tables_get_pairs() {
+        // Raw-symbol and distance tables never combine entries.
+        let symbols = HuffmanDecoder::new(&[2, 2, 2, 2]).unwrap();
+        let distances = HuffmanDecoder::new_for(&[2, 2, 2, 2], Alphabet::Distance).unwrap();
+
+        for index in 0..512u64 {
+            assert_eq!(symbols.lookup(index).code_length(), 2);
+            assert_eq!(distances.lookup(index).code_length(), 2);
+        }
     }
 }

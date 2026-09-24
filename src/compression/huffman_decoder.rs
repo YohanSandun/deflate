@@ -20,7 +20,7 @@ pub(crate) enum Alphabet {
 /// | bits   | field                                                        |
 /// |--------|--------------------------------------------------------------|
 /// | 0..5   | code length; for `SECONDARY`, the secondary table's index width |
-/// | 5..9   | extra bits to read after the code (`BASE` only)               |
+/// | 5..9   | extra bits to read after the code (`BASE`); in a literal/length table, the number of literals (1 or 2) in a `LITERAL` |
 /// | 9..12  | kind                                                         |
 /// | 16..32 | value: symbol, literal byte, base, or secondary table offset  |
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -160,14 +160,48 @@ impl HuffmanDecoder {
             }
         }
 
+        if alphabet == Alphabet::LiteralLength {
+            self.add_double_literals();
+        }
+
         Ok(())
+    }
+
+    fn add_double_literals(&mut self) {
+        let singles = self.table;
+
+        for (index, entry) in self.table.iter_mut().enumerate() {
+            let first = singles[index];
+            if first.kind() != Entry::LITERAL {
+                continue;
+            }
+
+            let first_length = first.code_length() as usize;
+            
+            let second = singles[index >> first_length];
+            if second.kind() != Entry::LITERAL {
+                continue;
+            }
+
+            let second_length = second.code_length() as usize;
+            if first_length + second_length > TABLE_BITS {
+                continue;
+            }
+
+            *entry = Entry::new(
+                Entry::LITERAL,
+                first_length + second_length,
+                2,
+                (first.value() | second.value() << 8) as u16,
+            );
+        }
     }
 
     fn symbol_entry(alphabet: Alphabet, symbol: usize, bits: usize) -> Entry {
         match alphabet {
             Alphabet::Symbols => Entry::new(Entry::LITERAL, bits, 0, symbol as u16),
             Alphabet::LiteralLength => match symbol {
-                0..=255 => Entry::new(Entry::LITERAL, bits, 0, symbol as u16),
+                0..=255 => Entry::new(Entry::LITERAL, bits, 1, symbol as u16),
                 256 => Entry::new(Entry::END_OF_BLOCK, bits, 0, 0),
                 257..=285 => Entry::new(
                     Entry::BASE,

@@ -227,37 +227,37 @@ impl<'a> Inflater<'a> {
         out: &mut Vec<u8>,
         pos: &mut usize,
     ) -> Result<(), Error> {
+        reader.refill_full();
+        let mut entry = literal_length_decoder.lookup(reader.peek_buffer());
+
         loop {
             if out.len() - *pos < OUTPUT_SLACK {
                 Self::grow_output(out, *pos);
             }
 
-            reader.refill_full();
-
-            let entry = literal_length_decoder.lookup(reader.peek_buffer());
-
             if entry.kind() == Entry::LITERAL {
-                // Literal run: codes are at most 15 bits, so up to three fit in the
-                // 56 buffered bits without another refill.
                 reader.consume_buffered(entry.code_length())?;
-                out[*pos] = entry.value() as u8;
-                *pos += 1;
+                let next = literal_length_decoder.lookup(reader.peek_buffer());
+                Self::write_literals(out, pos, entry);
+                entry = next;
 
-                let entry = literal_length_decoder.lookup(reader.peek_buffer());
                 if entry.kind() == Entry::LITERAL {
                     reader.consume_buffered(entry.code_length())?;
-                    out[*pos] = entry.value() as u8;
-                    *pos += 1;
+                    let next = literal_length_decoder.lookup(reader.peek_buffer());
+                    Self::write_literals(out, pos, entry);
+                    entry = next;
 
-                    let entry = literal_length_decoder.lookup(reader.peek_buffer());
                     if entry.kind() == Entry::LITERAL {
                         reader.consume_buffered(entry.code_length())?;
-                        out[*pos] = entry.value() as u8;
-                        *pos += 1;
+                        Self::write_literals(out, pos, entry);
+                        
+                        reader.refill_full();
+                        entry = literal_length_decoder.lookup(reader.peek_buffer());
+                        continue;
                     }
                 }
-
-                // Anything else needs a full buffer, so refill first.
+                
+                reader.refill_full();
                 continue;
             }
 
@@ -267,14 +267,19 @@ impl<'a> Inflater<'a> {
                 Entry::BASE => {
                     let length = entry.value() + reader.take_buffered(entry.extra_bits())?;
 
-                    let entry = distance_decoder.lookup(reader.peek_buffer());
-                    reader.consume_buffered(entry.code_length())?;
+                    let distance_entry = distance_decoder.lookup(reader.peek_buffer());
+                    reader.consume_buffered(distance_entry.code_length())?;
 
-                    if entry.kind() != Entry::BASE {
-                        return Err(entry.error());
+                    if distance_entry.kind() != Entry::BASE {
+                        return Err(distance_entry.error());
                     }
 
-                    let distance = entry.value() + reader.take_buffered(entry.extra_bits())?;
+                    let distance = distance_entry.value()
+                        + reader.take_buffered(distance_entry.extra_bits())?;
+                    
+                    reader.refill_full();
+                    entry = literal_length_decoder.lookup(reader.peek_buffer());
+
                     Self::copy_match(out, *pos, length as usize, distance as usize)?;
                     *pos += length as usize;
                 }
@@ -282,6 +287,13 @@ impl<'a> Inflater<'a> {
                 _ => return Err(entry.error()),
             }
         }
+    }
+    
+    #[inline(always)]
+    fn write_literals(out: &mut [u8], pos: &mut usize, entry: Entry) {
+        let bytes = (entry.value() as u16).to_le_bytes();
+        out[*pos..*pos + 2].copy_from_slice(&bytes);
+        *pos += entry.extra_bits() as usize;
     }
 
     #[cold]
