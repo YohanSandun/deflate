@@ -26,6 +26,10 @@ use compression::inflater::Inflater;
 
 /// Decompresses a raw DEFLATE stream.
 ///
+/// Decoding stops at the end of the final block; any bytes after it are ignored.
+///
+/// # Errors
+///
 /// Returns an [`Error`] saying what's wrong if the data is corrupt, truncated,
 /// or not DEFLATE. Malformed input never panics.
 ///

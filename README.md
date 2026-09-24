@@ -59,6 +59,8 @@ wrapper. That's what you get from, for example:
 - Browsers: `new CompressionStream("deflate-raw")`
 - Python: `zlib.compressobj(wbits=-15)`
 
+Decoding stops at the end of the final DEFLATE block; any bytes after it are ignored.
+
 zlib and gzip data (including PNG image data) wrap the DEFLATE stream in a header
 and a checksum. Support for those formats isn't in this version yet.
 
