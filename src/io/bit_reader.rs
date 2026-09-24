@@ -160,3 +160,6 @@ impl<'a> BitReader<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

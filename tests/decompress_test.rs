@@ -462,4 +462,102 @@ mod tests {
 
         assert_eq!(format!("{:?}", Decompressor::new()), "Decompressor { .. }");
     }
+
+    #[test]
+    fn decompress_into_appends_and_returns_count() {
+        let mut decompressor = Decompressor::new();
+        let mut out = b"prefix:".to_vec();
+
+        let hello = [0xCB, 0x48, 0xCD, 0xC9, 0xC9, 0x57, 0xC8, 0x40, 0x27, 0x01];
+        let written = decompressor.decompress_into(&hello, &mut out).unwrap();
+
+        assert_eq!(written, 23);
+        assert_eq!(out, b"prefix:hello hello hello hello");
+    }
+
+    #[test]
+    fn decompress_into_concatenates_streams() {
+        let mut decompressor = Decompressor::new();
+        let mut out = Vec::new();
+        let streams = mixed_streams();
+
+        let mut expected = Vec::new();
+        for (_, compressed, raw) in &streams {
+            let written = decompressor.decompress_into(compressed, &mut out).unwrap();
+            assert_eq!(written, raw.len());
+            expected.extend_from_slice(raw);
+        }
+
+        assert!(out == expected, "concatenated output differs");
+    }
+
+    #[test]
+    fn decompress_into_cannot_refer_back_into_existing_output() {
+        let mut decompressor = Decompressor::new();
+
+        // Hand-encoded: a copy at distance 1 before this stream wrote anything. With
+        // "abc" already in the buffer it would be in range of the buffer, but not of
+        // the stream, so it must still be rejected.
+        let mut out = b"abc".to_vec();
+        assert_eq!(
+            decompressor.decompress_into(&[0x03, 0x02, 0x00], &mut out),
+            Err(Error::DistanceTooFarBack)
+        );
+        assert_eq!(out, b"abc");
+
+        // Hand-encoded: literal 'a', then a copy at distance 2 (one byte too far).
+        assert_eq!(
+            decompressor.decompress_into(&[0x4B, 0x04, 0x42, 0x00], &mut out),
+            Err(Error::DistanceTooFarBack)
+        );
+        assert_eq!(out, b"abc");
+
+        // Hand-encoded: literal 'a', then a copy at distance 1, exactly the stream's start.
+        assert_eq!(
+            decompressor.decompress_into(&[0x4B, 0x04, 0x02, 0x00], &mut out),
+            Ok(4)
+        );
+        assert_eq!(out, b"abcaaaa");
+    }
+
+    #[test]
+    fn decompress_into_truncates_on_error() {
+        let mut decompressor = Decompressor::new();
+        let dynamic = include_bytes!("data/dynamic_text.deflate");
+
+        let mut out = b"keep me".to_vec();
+        // Cut halfway: plenty of output has been written by the time it fails.
+        assert!(
+            decompressor
+                .decompress_into(&dynamic[..dynamic.len() / 2], &mut out)
+                .is_err()
+        );
+        assert_eq!(out, b"keep me");
+
+        // And the buffer is still fine to use.
+        let written = decompressor.decompress_into(dynamic, &mut out).unwrap();
+        assert_eq!(written, include_bytes!("data/dynamic_text.txt").len());
+        assert!(out[7..] == include_bytes!("data/dynamic_text.txt")[..]);
+    }
+
+    #[test]
+    fn decompress_into_reuses_the_buffer_without_reallocating() {
+        let mut decompressor = Decompressor::new();
+        let mut streams = mixed_streams();
+        // Largest input first, so the buffer is big enough for everything after it.
+        streams.sort_by_key(|(_, compressed, _)| std::cmp::Reverse(compressed.len()));
+
+        let mut out = Vec::new();
+        decompressor
+            .decompress_into(&streams[0].1, &mut out)
+            .unwrap();
+        let buffer = out.as_ptr();
+
+        for (name, compressed, expected) in &streams {
+            out.clear();
+            decompressor.decompress_into(compressed, &mut out).unwrap();
+            assert!(out == *expected, "{name}: wrong output");
+            assert_eq!(out.as_ptr(), buffer, "{name}: buffer was reallocated");
+        }
+    }
 }

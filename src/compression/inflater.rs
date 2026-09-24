@@ -52,10 +52,32 @@ impl Inflater {
     }
 
     pub(crate) fn inflate(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut inflated_data = Vec::new();
+        self.inflate_into(data, &mut inflated_data)?;
+        Ok(inflated_data)
+    }
+
+    pub(crate) fn inflate_into(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<usize, Error> {
+        let stream_start = out.len();
+
+        match self.inflate_blocks(data, out, stream_start) {
+            Ok(()) => Ok(out.len() - stream_start),
+            Err(error) => {
+                out.truncate(stream_start);
+                Err(error)
+            }
+        }
+    }
+
+    fn inflate_blocks(
+        &mut self,
+        data: &[u8],
+        out: &mut Vec<u8>,
+        stream_start: usize,
+    ) -> Result<(), Error> {
         let mut reader = BitReader::new(data);
 
-        let capacity = data.len().saturating_mul(4).min(MAX_INITIAL_CAPACITY);
-        let mut inflated_data: Vec<u8> = Vec::with_capacity(capacity);
+        out.reserve(data.len().saturating_mul(4).min(MAX_INITIAL_CAPACITY));
 
         let mut b_final = 0u8;
         while b_final == 0 {
@@ -63,14 +85,14 @@ impl Inflater {
             let b_type = reader.read_next_bits(2)?;
 
             match b_type {
-                0 => Self::inflate_stored_block(&mut reader, &mut inflated_data)?,
-                1 => Self::inflate_fixed_huffman_block(&mut reader, &mut inflated_data)?,
-                2 => self.inflate_dynamic_huffman_block(&mut reader, &mut inflated_data)?,
+                0 => Self::inflate_stored_block(&mut reader, out)?,
+                1 => Self::inflate_fixed_huffman_block(&mut reader, out, stream_start)?,
+                2 => self.inflate_dynamic_huffman_block(&mut reader, out, stream_start)?,
                 _ => return Err(Error::InvalidBlockType),
             }
         }
 
-        Ok(inflated_data)
+        Ok(())
     }
 
     fn inflate_stored_block(
@@ -94,6 +116,7 @@ impl Inflater {
     fn inflate_fixed_huffman_block(
         reader: &mut BitReader,
         inflated_data: &mut Vec<u8>,
+        stream_start: usize,
     ) -> Result<(), Error> {
         let (literal_length_decoder, distance_decoder) = &*FIXED_DECODERS;
 
@@ -102,6 +125,7 @@ impl Inflater {
             literal_length_decoder,
             distance_decoder,
             inflated_data,
+            stream_start,
         )?;
 
         Ok(())
@@ -111,6 +135,7 @@ impl Inflater {
         &mut self,
         reader: &mut BitReader,
         inflated_data: &mut Vec<u8>,
+        stream_start: usize,
     ) -> Result<(), Error> {
         let hlit = reader.read_next_bits(5)? as usize + 257;
         let hdist = reader.read_next_bits(5)? as usize + 1;
@@ -159,6 +184,7 @@ impl Inflater {
             &self.literal_length_decoder,
             &self.distance_decoder,
             inflated_data,
+            stream_start,
         )?;
 
         Ok(())
@@ -202,12 +228,14 @@ impl Inflater {
         literal_length_decoder: &HuffmanDecoder,
         distance_decoder: &HuffmanDecoder,
         inflated_data: &mut Vec<u8>,
+        stream_start: usize,
     ) -> Result<(), Error> {
         let result = Self::decode_symbols(
             reader,
             literal_length_decoder,
             distance_decoder,
             inflated_data,
+            stream_start,
         );
         reader.finish_buffered();
         result
@@ -218,6 +246,7 @@ impl Inflater {
         literal_length_decoder: &HuffmanDecoder,
         distance_decoder: &HuffmanDecoder,
         inflated_data: &mut Vec<u8>,
+        stream_start: usize,
     ) -> Result<(), Error> {
         let mut pos = inflated_data.len();
         let result = Self::decode_symbols_into(
@@ -226,6 +255,7 @@ impl Inflater {
             distance_decoder,
             inflated_data,
             &mut pos,
+            stream_start,
         );
         inflated_data.truncate(pos);
         result
@@ -238,6 +268,7 @@ impl Inflater {
         distance_decoder: &HuffmanDecoder,
         out: &mut Vec<u8>,
         pos: &mut usize,
+        stream_start: usize,
     ) -> Result<(), Error> {
         reader.refill_full();
         let mut entry = literal_length_decoder.lookup(reader.peek_buffer());
@@ -292,7 +323,7 @@ impl Inflater {
                     reader.refill_full();
                     entry = literal_length_decoder.lookup(reader.peek_buffer());
 
-                    Self::copy_match(out, *pos, length as usize, distance as usize)?;
+                    Self::copy_match(out, *pos, length as usize, distance as usize, stream_start)?;
                     *pos += length as usize;
                 }
                 Entry::END_OF_BLOCK => return Ok(()),
@@ -317,8 +348,14 @@ impl Inflater {
     }
 
     #[inline(always)]
-    fn copy_match(out: &mut [u8], pos: usize, length: usize, distance: usize) -> Result<(), Error> {
-        if distance > pos {
+    fn copy_match(
+        out: &mut [u8],
+        pos: usize,
+        length: usize,
+        distance: usize,
+        stream_start: usize,
+    ) -> Result<(), Error> {
+        if distance > pos - stream_start {
             return Err(Error::DistanceTooFarBack);
         }
 

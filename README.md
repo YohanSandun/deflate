@@ -69,6 +69,25 @@ for compressed in &streams {
 # Ok::<(), rust_deflate::Error>(())
 ```
 
+`decompress_into` also reuses the output buffer. It appends to a `Vec<u8>` you pass
+in and returns the number of bytes added; on error, the `Vec` is truncated back to
+its original length. A stream can't refer back into bytes that were already there.
+
+```rust
+use rust_deflate::Decompressor;
+
+# let streams: Vec<Vec<u8>> = vec![vec![0xCB, 0x48, 0xCD, 0xC9, 0xC9, 0x57, 0xC8, 0x40, 0x27, 0x01]];
+let mut decompressor = Decompressor::new();
+let mut out = Vec::new();
+
+for compressed in &streams {
+    out.clear();
+    decompressor.decompress_into(compressed, &mut out)?;
+    // use `out`...
+}
+# Ok::<(), rust_deflate::Error>(())
+```
+
 ## Input format
 
 The input must be **raw DEFLATE**, with no zlib ([RFC 1950]) or gzip ([RFC 1952])

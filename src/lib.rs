@@ -88,6 +88,39 @@ impl Decompressor {
     pub fn decompress(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
         self.inflater.inflate(data)
     }
+
+    /// Decompresses a raw DEFLATE stream and appends it to `out`, returning the
+    /// number of bytes appended.
+    ///
+    /// Reusing `out` between calls (with [`Vec::clear`] in between) also saves
+    /// allocating an output buffer each time. What `out` already holds is left
+    /// alone, and the stream can't refer back into it.
+    ///
+    /// ```
+    /// use rust_deflate::Decompressor;
+    ///
+    /// // "hello hello hello hello", compressed by zlib as raw DEFLATE.
+    /// let compressed = [0xCB, 0x48, 0xCD, 0xC9, 0xC9, 0x57, 0xC8, 0x40, 0x27, 0x01];
+    ///
+    /// let mut decompressor = Decompressor::new();
+    /// let mut out = Vec::new();
+    ///
+    /// for _ in 0..3 {
+    ///     out.clear();
+    ///     let written = decompressor.decompress_into(&compressed, &mut out).unwrap();
+    ///     assert_eq!(written, 23);
+    ///     assert_eq!(out, b"hello hello hello hello");
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] saying what's wrong if the data is corrupt, truncated,
+    /// or not DEFLATE. `out` is then truncated back to its original length, so it
+    /// never ends up holding part of a stream.
+    pub fn decompress_into(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<usize, Error> {
+        self.inflater.inflate_into(data, out)
+    }
 }
 
 impl Default for Decompressor {

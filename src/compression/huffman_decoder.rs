@@ -318,3 +318,6 @@ impl HuffmanDecoder {
         Ok(entry.value() as usize)
     }
 }
+
+#[cfg(test)]
+mod tests;
