@@ -1,4 +1,4 @@
-use rust_deflate::compression::inflater::Inflater;
+use rust_deflate::{decompress, Error};
 
 #[cfg(test)]
 mod tests {
@@ -14,9 +14,7 @@ mod tests {
             0x63, 0x6B, 0x21,
         ];
 
-        let mut inflater = Inflater::new(&data);
-
-        let inflated = inflater.inflate();
+        let inflated = decompress(&data);
 
         assert_eq!(
             inflated.unwrap(),
@@ -31,7 +29,7 @@ mod tests {
     fn inflate_fixed_block_with_back_references() {
         let data = [0xCB, 0x48, 0xCD, 0xC9, 0xC9, 0x57, 0xC8, 0x40, 0x27, 0x01];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
         assert_eq!(inflated.unwrap(), b"hello hello hello hello");
     }
@@ -44,7 +42,7 @@ mod tests {
             0x20, 0x00,
         ];
 
-        let inflated = Inflater::new(&data).inflate().unwrap();
+        let inflated = decompress(&data).unwrap();
 
         let mut expected = vec![b'a'; 300];
         expected.extend(b"ab".repeat(200));
@@ -63,7 +61,7 @@ mod tests {
             0x03, 0x00,
         ];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
         assert_eq!(
             inflated.unwrap(),
@@ -77,7 +75,7 @@ mod tests {
         let data = include_bytes!("data/fixed_text.deflate");
         let expected = include_bytes!("data/fixed_text.txt");
 
-        let inflated = Inflater::new(data).inflate().unwrap();
+        let inflated = decompress(data).unwrap();
 
         assert_eq!(inflated.len(), expected.len());
         assert!(inflated == expected, "inflated output differs from expected text");
@@ -88,9 +86,9 @@ mod tests {
         // Hand-encoded: copy of length 3 at distance 1 before any output.
         let data = [0x03, 0x02, 0x00];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
-        assert_eq!(inflated, Err("invalid distance: too far back".to_string()));
+        assert_eq!(inflated, Err(Error::DistanceTooFarBack));
     }
 
     #[test]
@@ -98,9 +96,9 @@ mod tests {
         // Hand-encoded: literal 'a', then copy of length 3 at distance 2.
         let data = [0x4B, 0x04, 0x42, 0x00];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
-        assert_eq!(inflated, Err("invalid distance: too far back".to_string()));
+        assert_eq!(inflated, Err(Error::DistanceTooFarBack));
     }
 
     #[test]
@@ -108,7 +106,7 @@ mod tests {
         // Hand-encoded: literal 'a', then copy of length 3 at distance 1.
         let data = [0x4B, 0x04, 0x02, 0x00];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
         assert_eq!(inflated.unwrap(), b"aaaa");
     }
@@ -123,7 +121,7 @@ mod tests {
             0x05, 0x00,
         ];
 
-        let inflated = Inflater::new(&data).inflate().unwrap();
+        let inflated = decompress(&data).unwrap();
 
         let mut expected = b"abc".repeat(100);
         expected.extend(b"xyzuv".repeat(60));
@@ -142,7 +140,7 @@ mod tests {
             0x50, 0x8C, 0x4D, 0x54, 0x0F, 0x00,
         ];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
         assert_eq!(
             inflated.unwrap(),
@@ -158,7 +156,7 @@ mod tests {
             0xCB, 0x48, 0xCD, 0xC9, 0xC9, 0x57, 0xC8, 0x40, 0x27, 0x01,
         ];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
         assert_eq!(inflated.unwrap(), b"12345hello hello hello hello");
     }
@@ -168,9 +166,9 @@ mod tests {
         // LEN says 5 bytes but only 3 follow.
         let data = [0x01, 0x05, 0x00, 0xFA, 0xFF, b'1', b'2', b'3'];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
-        assert_eq!(inflated, Err("unexpected end of input".to_string()));
+        assert_eq!(inflated, Err(Error::UnexpectedEndOfInput));
     }
 
     // Dynamic Huffman blocks. zlib streams use the default strategy; the small
@@ -182,7 +180,7 @@ mod tests {
         let data = include_bytes!("data/dynamic_text.deflate");
         let expected = include_bytes!("data/dynamic_text.txt");
 
-        let inflated = Inflater::new(data).inflate().unwrap();
+        let inflated = decompress(data).unwrap();
 
         assert_eq!(inflated.len(), expected.len());
         assert!(inflated == expected, "inflated output differs from expected text");
@@ -194,7 +192,7 @@ mod tests {
         let data = include_bytes!("data/dynamic_multi.deflate");
         let text = include_bytes!("data/dynamic_text.txt");
 
-        let inflated = Inflater::new(data).inflate().unwrap();
+        let inflated = decompress(data).unwrap();
 
         let mut expected = text[..3000].to_vec();
         for _ in 0..4 {
@@ -213,7 +211,7 @@ mod tests {
             0x7F, 0x04, 0x85, 0x1B,
         ];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
         assert_eq!(inflated.unwrap(), b"ababa");
     }
@@ -226,7 +224,7 @@ mod tests {
             0xEA, 0xFF, 0x0F, 0x26, 0xB0, 0x01,
         ];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
         assert_eq!(inflated.unwrap(), b"abc");
     }
@@ -237,8 +235,8 @@ mod tests {
         let data = [0x05, 0x80, 0x03, 0x00, 0x00, 0x00, 0x00, 0x40, 0x02];
 
         assert_eq!(
-            Inflater::new(&data).inflate(),
-            Err("repeat with no previous code length".to_string())
+            decompress(&data),
+            Err(Error::RepeatWithoutPreviousLength)
         );
     }
 
@@ -251,8 +249,8 @@ mod tests {
         ];
 
         assert_eq!(
-            Inflater::new(&data).inflate(),
-            Err("code length repeat past end".to_string())
+            decompress(&data),
+            Err(Error::RepeatPastEnd)
         );
     }
 
@@ -265,8 +263,8 @@ mod tests {
         ];
 
         assert_eq!(
-            Inflater::new(&data).inflate(),
-            Err("too many length or distance symbols".to_string())
+            decompress(&data),
+            Err(Error::TooManyCodes)
         );
     }
 
@@ -279,8 +277,8 @@ mod tests {
         ];
 
         assert_eq!(
-            Inflater::new(&data).inflate(),
-            Err("too many length or distance symbols".to_string())
+            decompress(&data),
+            Err(Error::TooManyCodes)
         );
     }
 
@@ -289,9 +287,9 @@ mod tests {
         // Three code-length symbols of length 1.
         let data = [0x05, 0x80, 0x81, 0x04, 0x00, 0x00, 0x00, 0x40, 0x00];
 
-        let inflated = Inflater::new(&data).inflate();
+        let inflated = decompress(&data);
 
-        assert_eq!(inflated, Err("over-subscribed Huffman code".to_string()));
+        assert_eq!(inflated, Err(Error::OverSubscribedCode));
     }
 
     #[test]
@@ -299,8 +297,8 @@ mod tests {
         let data = include_bytes!("data/dynamic_text.deflate");
 
         assert_eq!(
-            Inflater::new(&data[..20]).inflate(),
-            Err("unexpected end of input".to_string())
+            decompress(&data[..20]),
+            Err(Error::UnexpectedEndOfInput)
         );
     }
 
@@ -313,8 +311,8 @@ mod tests {
         ];
 
         assert_eq!(
-            Inflater::new(&data).inflate(),
-            Err("missing end-of-block code".to_string())
+            decompress(&data),
+            Err(Error::MissingEndOfBlockCode)
         );
     }
 
@@ -326,7 +324,7 @@ mod tests {
         let data = include_bytes!("data/matches.deflate");
         let expected = include_bytes!("data/matches.raw");
 
-        let inflated = Inflater::new(data).inflate().unwrap();
+        let inflated = decompress(data).unwrap();
 
         assert_eq!(inflated.len(), expected.len());
         assert!(inflated == expected, "inflated output differs from expected data");
@@ -338,7 +336,7 @@ mod tests {
         // fixed code but no meaning.
         let data = [0x4B, 0x1C, 0x03, 0x00];
 
-        assert_eq!(Inflater::new(&data).inflate(), Err("invalid length symbol".to_string()));
+        assert_eq!(decompress(&data), Err(Error::InvalidLengthSymbol));
     }
 
     #[test]
@@ -346,7 +344,7 @@ mod tests {
         // Hand-encoded fixed block: literal 'a', then a length with distance symbol 30.
         let data = [0x4B, 0x04, 0x3E, 0x00];
 
-        assert_eq!(Inflater::new(&data).inflate(), Err("invalid distance symbol".to_string()));
+        assert_eq!(decompress(&data), Err(Error::InvalidDistanceSymbol));
     }
 
     #[test]
@@ -355,7 +353,7 @@ mod tests {
         // leak into the result, even across several blocks.
         let data = include_bytes!("data/dynamic_multi.deflate");
 
-        let inflated = Inflater::new(data).inflate().unwrap();
+        let inflated = decompress(data).unwrap();
 
         assert_eq!(inflated.len(), 3000 + 4 * 256 + 6000);
     }
@@ -365,7 +363,7 @@ mod tests {
         let data = include_bytes!("data/matches.deflate");
 
         for cut in [data.len() / 3, data.len() / 2, data.len() - 1] {
-            assert!(Inflater::new(&data[..cut]).inflate().is_err(), "cut at {cut} should fail");
+            assert!(decompress(&data[..cut]).is_err(), "cut at {cut} should fail");
         }
     }
 }

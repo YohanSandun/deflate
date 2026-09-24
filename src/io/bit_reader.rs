@@ -1,3 +1,5 @@
+use crate::Error;
+
 pub struct BitReader<'a> {
     data: &'a [u8],
     byte_pos: usize,
@@ -63,17 +65,16 @@ impl<'a> BitReader<'a> {
         self.consume(self.bit_count % 8);
     }
 
-    pub fn read_next_bit(&mut self) -> Result<u8, String> {
+    pub fn read_next_bit(&mut self) -> Result<u8, Error> {
         Ok(self.read_next_bits(1)? as u8)
     }
 
-    pub fn read_next_bits(&mut self, n: u32) -> Result<u32, String> {
-        if n > 32 {
-            return Err("cannot read more than 32 bits".to_string());
-        }
+    pub fn read_next_bits(&mut self, n: u32) -> Result<u32, Error> {
+        // Internal API: callers never ask for more; it's a bug if they do.
+        assert!(n <= 32, "cannot read more than 32 bits");
 
         if n > self.bit_count {
-            return Err("unexpected end of input".to_string());
+            return Err(Error::UnexpectedEndOfInput);
         }
 
         let result = (self.bit_buf & ((1u64 << n) - 1)) as u32;
@@ -83,12 +84,12 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline]
-    pub fn peek_next_bits(&self, n: u32) -> Result<u32, String> {
-        if n > 32 {
-            return Err("cannot read more than 32 bits".to_string());
-        }
+    #[cfg(test)] // only the tests use this
+    pub fn peek_next_bits(&self, n: u32) -> u32 {
+        // Internal API: callers never ask for more; it's a bug if they do.
+        assert!(n <= 32, "cannot read more than 32 bits");
 
-        Ok((self.bit_buf & ((1u64 << n) - 1)) as u32)
+        (self.bit_buf & ((1u64 << n) - 1)) as u32
     }
 
     #[inline]
@@ -97,9 +98,9 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline]
-    pub(crate) fn consume_buffered(&mut self, n: u32) -> Result<(), String> {
+    pub(crate) fn consume_buffered(&mut self, n: u32) -> Result<(), Error> {
         if n > self.bit_count {
-            return Err("unexpected end of input".to_string());
+            return Err(Error::UnexpectedEndOfInput);
         }
 
         self.bit_buf >>= n;
@@ -109,7 +110,7 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline]
-    pub(crate) fn take_buffered(&mut self, n: u32) -> Result<u32, String> {
+    pub(crate) fn take_buffered(&mut self, n: u32) -> Result<u32, Error> {
         let value = (self.bit_buf & ((1u64 << n) - 1)) as u32;
         self.consume_buffered(n)?;
 
@@ -121,15 +122,14 @@ impl<'a> BitReader<'a> {
         self.refill();
     }
 
-    pub fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], String> {
-        if self.bit_count % 8 != 0 {
-            return Err("reader is not byte-aligned".to_string());
-        }
+    pub fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
+        // Internal API: only called right after align_to_byte.
+        assert!(self.bit_count % 8 == 0, "reader is not byte-aligned");
         
         let start = self.byte_pos - (self.bit_count / 8) as usize;
 
         if n > self.data.len() - start {
-            return Err("unexpected end of input".to_string());
+            return Err(Error::UnexpectedEndOfInput);
         }
 
         let data = self.data;
@@ -142,7 +142,7 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline]
-    pub fn skip_bits(&mut self, n: usize) -> Result<(), String> {
+    pub fn skip_bits(&mut self, n: usize) -> Result<(), Error> {
         if n <= self.bit_count as usize {
             self.consume(n as u32);
             return Ok(());
@@ -150,7 +150,7 @@ impl<'a> BitReader<'a> {
 
         let remaining_bits = self.bit_count as usize + (self.data.len() - self.byte_pos) * 8;
         if n > remaining_bits {
-            return Err("unexpected end of input".to_string());
+            return Err(Error::UnexpectedEndOfInput);
         }
 
         // Skipping past the buffer: drop it, jump whole bytes, then the leftover bits.

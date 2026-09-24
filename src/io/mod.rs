@@ -1,1 +1,4 @@
-pub mod bit_reader;
+pub(crate) mod bit_reader;
+
+#[cfg(test)]
+mod bit_reader_tests;

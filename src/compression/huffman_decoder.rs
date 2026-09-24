@@ -1,5 +1,6 @@
 use crate::compression::tables::{DISTANCE_BASE, DISTANCE_EXTRA_BITS, LENGTH_BASE, LENGTH_EXTRA_BITS};
 use crate::io::bit_reader::BitReader;
+use crate::Error;
 
 const MAX_BITS: usize = 15;
 const TABLE_BITS: usize = 9;
@@ -60,13 +61,12 @@ impl Entry {
     }
 
     #[cold]
-    pub(crate) fn error(self) -> String {
+    pub(crate) fn error(self) -> Error {
         match self.kind() {
-            Self::BAD_LENGTH => "invalid length symbol",
-            Self::BAD_DISTANCE => "invalid distance symbol",
-            _ => "invalid Huffman code",
+            Self::BAD_LENGTH => Error::InvalidLengthSymbol,
+            Self::BAD_DISTANCE => Error::InvalidDistanceSymbol,
+            _ => Error::InvalidCode,
         }
-        .to_string()
     }
 }
 
@@ -78,11 +78,12 @@ pub struct HuffmanDecoder {
 }
 
 impl HuffmanDecoder {
-    pub fn new(code_lengths: &[u8]) -> Result<Self, String> {
+    #[cfg(test)] // only the tests use this
+    pub fn new(code_lengths: &[u8]) -> Result<Self, Error> {
         Self::new_for(code_lengths, Alphabet::Symbols)
     }
 
-    pub(crate) fn new_for(code_lengths: &[u8], alphabet: Alphabet) -> Result<Self, String> {
+    pub(crate) fn new_for(code_lengths: &[u8], alphabet: Alphabet) -> Result<Self, Error> {
         let mut decoder = Self::empty();
         decoder.rebuild_for(code_lengths, alphabet)?;
         Ok(decoder)
@@ -95,16 +96,15 @@ impl HuffmanDecoder {
         }
     }
 
-    pub fn rebuild(&mut self, code_lengths: &[u8]) -> Result<(), String> {
+    pub fn rebuild(&mut self, code_lengths: &[u8]) -> Result<(), Error> {
         self.rebuild_for(code_lengths, Alphabet::Symbols)
     }
 
-    pub(crate) fn rebuild_for(&mut self, code_lengths: &[u8], alphabet: Alphabet) -> Result<(), String> {
+    pub(crate) fn rebuild_for(&mut self, code_lengths: &[u8], alphabet: Alphabet) -> Result<(), Error> {
         let mut bl_counts = [0u16; MAX_BITS + 1];
         for code_length in code_lengths {
-            if *code_length as usize > MAX_BITS {
-                return Err("invalid Huffman code length".to_string());
-            }
+            // Code lengths come from 3-bit fields or symbols 0..=15, so never exceed 15.
+            assert!(*code_length as usize <= MAX_BITS, "invalid Huffman code length");
 
             if *code_length > 0 {
                 bl_counts[*code_length as usize] += 1;
@@ -115,7 +115,7 @@ impl HuffmanDecoder {
         for bits in 1..=MAX_BITS {
             left = (left << 1) - bl_counts[bits] as i32;
             if left < 0 {
-                return Err("over-subscribed Huffman code".to_string());
+                return Err(Error::OverSubscribedCode);
             }
         }
 
@@ -247,7 +247,7 @@ impl HuffmanDecoder {
         self.secondary[entry.value() as usize + index]
     }
 
-    pub fn decode(&self, reader: &mut BitReader) -> Result<usize, String> {
+    pub fn decode(&self, reader: &mut BitReader) -> Result<usize, Error> {
         let entry = self.lookup(reader.peek_buffer());
 
         if entry.kind() != Entry::LITERAL {

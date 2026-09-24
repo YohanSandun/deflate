@@ -1,4 +1,5 @@
-use rust_deflate::io::bit_reader::BitReader;
+use crate::io::bit_reader::BitReader;
+use crate::Error;
 
 #[cfg(test)]
 mod tests {
@@ -99,7 +100,7 @@ mod tests {
 
         assert_eq!(
             result,
-            Err("unexpected end of input".to_string())
+            Err(Error::UnexpectedEndOfInput)
         );
     }
 
@@ -115,7 +116,7 @@ mod tests {
 
         assert_eq!(
             reader.read_next_bit(),
-            Err("unexpected end of input".to_string())
+            Err(Error::UnexpectedEndOfInput)
         );
     }
 
@@ -196,7 +197,7 @@ mod tests {
 
         assert_eq!(
             reader.read_next_bits(1),
-            Err("unexpected end of input".to_string())
+            Err(Error::UnexpectedEndOfInput)
         );
     }
 
@@ -208,7 +209,7 @@ mod tests {
         // Only 8 bits available, asking for 9.
         assert_eq!(
             reader.read_next_bits(9),
-            Err("unexpected end of input".to_string())
+            Err(Error::UnexpectedEndOfInput)
         );
     }
 
@@ -221,41 +222,26 @@ mod tests {
 
         assert_eq!(
             reader.read_next_bits(1),
-            Err("unexpected end of input".to_string())
+            Err(Error::UnexpectedEndOfInput)
         );
     }
 
     #[test]
+    #[should_panic(expected = "cannot read more than 32 bits")]
     fn read_next_bits_rejects_more_than_32_bits() {
         let data = [0xFF; 8];
         let mut reader = BitReader::new(&data);
 
-        assert_eq!(
-            reader.read_next_bits(33),
-            Err("cannot read more than 32 bits".to_string())
-        );
+        let _ = reader.read_next_bits(33);
     }
 
     #[test]
+    #[should_panic(expected = "cannot read more than 32 bits")]
     fn read_next_bits_rejects_large_values() {
         let data = [0xFF; 8];
         let mut reader = BitReader::new(&data);
 
-        assert_eq!(
-            reader.read_next_bits(100),
-            Err("cannot read more than 32 bits".to_string())
-        );
-    }
-
-    #[test]
-    fn read_next_bits_does_not_consume_data_when_n_is_too_large() {
-        let data = [0b00000001];
-        let mut reader = BitReader::new(&data);
-
-        assert!(reader.read_next_bits(33).is_err());
-
-        // The invalid request should not advance the reader.
-        assert_eq!(reader.read_next_bit().unwrap(), 1);
+        let _ = reader.read_next_bits(100);
     }
 
     #[test]
@@ -264,7 +250,7 @@ mod tests {
         let reader = BitReader::new(&data);
 
         // Only 8 bits available; the missing high bits read as 0.
-        assert_eq!(reader.peek_next_bits(12).unwrap(), 0b10110001);
+        assert_eq!(reader.peek_next_bits(12), 0b10110001);
     }
 
     #[test]
@@ -272,7 +258,7 @@ mod tests {
         let data: [u8; 0] = [];
         let reader = BitReader::new(&data);
 
-        assert_eq!(reader.peek_next_bits(9).unwrap(), 0);
+        assert_eq!(reader.peek_next_bits(9), 0);
     }
 
     // Reference: bit `i` of the stream, LSB first.
@@ -302,7 +288,7 @@ mod tests {
                 break;
             }
 
-            assert_eq!(reader.peek_next_bits(n as u32).unwrap(), bits_at(&data, pos, n), "peek at bit {pos}");
+            assert_eq!(reader.peek_next_bits(n as u32), bits_at(&data, pos, n), "peek at bit {pos}");
             assert_eq!(reader.read_next_bits(n as u32).unwrap(), bits_at(&data, pos, n), "read at bit {pos}");
             pos += n;
         }
@@ -326,7 +312,7 @@ mod tests {
 
         reader.skip_bits(20 * 8).unwrap();
 
-        assert_eq!(reader.read_next_bit(), Err("unexpected end of input".to_string()));
+        assert_eq!(reader.read_next_bit(), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -334,7 +320,7 @@ mod tests {
         let data = sample_data(20);
         let mut reader = BitReader::new(&data);
 
-        assert_eq!(reader.skip_bits(20 * 8 + 1), Err("unexpected end of input".to_string()));
+        assert_eq!(reader.skip_bits(20 * 8 + 1), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -354,8 +340,8 @@ mod tests {
         let data = [0b10110001, 0b11001100];
         let mut reader = BitReader::new(&data);
 
-        assert_eq!(reader.peek_next_bits(5).unwrap(), 0b10001);
-        assert_eq!(reader.peek_next_bits(5).unwrap(), 0b10001);
+        assert_eq!(reader.peek_next_bits(5), 0b10001);
+        assert_eq!(reader.peek_next_bits(5), 0b10001);
         assert_eq!(reader.read_next_bits(5).unwrap(), 0b10001);
     }
 
@@ -364,18 +350,16 @@ mod tests {
         let data = [0xFF];
         let reader = BitReader::new(&data);
 
-        assert_eq!(reader.peek_next_bits(0).unwrap(), 0);
+        assert_eq!(reader.peek_next_bits(0), 0);
     }
 
     #[test]
+    #[should_panic(expected = "cannot read more than 32 bits")]
     fn peek_next_bits_rejects_more_than_32_bits() {
         let data = [0xFF; 8];
         let reader = BitReader::new(&data);
 
-        assert_eq!(
-            reader.peek_next_bits(33),
-            Err("cannot read more than 32 bits".to_string())
-        );
+        let _ = reader.peek_next_bits(33);
     }
 
     #[test]
@@ -386,7 +370,7 @@ mod tests {
         reader.read_next_bits(12).unwrap();
 
         // 4 real 1-bits left, the rest reads as 0.
-        assert_eq!(reader.peek_next_bits(9).unwrap(), 0b000001111);
+        assert_eq!(reader.peek_next_bits(9), 0b000001111);
     }
 
     #[test]
@@ -420,7 +404,7 @@ mod tests {
             assert_eq!(reader.read_next_bits(8).unwrap(), byte as u32);
         }
 
-        assert_eq!(reader.read_next_bit(), Err("unexpected end of input".to_string()));
+        assert_eq!(reader.read_next_bit(), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -437,12 +421,12 @@ mod tests {
 
                     if start + n <= total_bits {
                         let expected = bits_at(&data, start, n);
-                        assert_eq!(reader.peek_next_bits(n as u32).unwrap(), expected, "peek len={len} start={start} n={n}");
+                        assert_eq!(reader.peek_next_bits(n as u32), expected, "peek len={len} start={start} n={n}");
                         assert_eq!(reader.read_next_bits(n as u32).unwrap(), expected, "read len={len} start={start} n={n}");
                     } else {
                         let available = total_bits - start;
                         let expected = bits_at(&data, start, available);
-                        assert_eq!(reader.peek_next_bits(n as u32).unwrap(), expected, "padded peek len={len} start={start} n={n}");
+                        assert_eq!(reader.peek_next_bits(n as u32), expected, "padded peek len={len} start={start} n={n}");
                         assert!(reader.read_next_bits(n as u32).is_err(), "read past end len={len} start={start} n={n}");
                     }
                 }
@@ -500,7 +484,7 @@ mod tests {
         reader.align_to_byte();
         assert_eq!(reader.read_next_bits(0).unwrap(), 0);
         assert_eq!(reader.skip_bits(0), Ok(()));
-        assert_eq!(reader.skip_bits(1), Err("unexpected end of input".to_string()));
+        assert_eq!(reader.skip_bits(1), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -523,7 +507,7 @@ mod tests {
         reader.read_next_bits(5).unwrap();
         reader.align_to_byte();
 
-        assert_eq!(reader.read_next_bit(), Err("unexpected end of input".to_string()));
+        assert_eq!(reader.read_next_bit(), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -565,7 +549,7 @@ mod tests {
         reader.read_next_bits(8).unwrap();
 
         assert_eq!(reader.read_bytes(19).unwrap(), &data[1..]);
-        assert_eq!(reader.read_next_bit(), Err("unexpected end of input".to_string()));
+        assert_eq!(reader.read_next_bit(), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
@@ -573,18 +557,19 @@ mod tests {
         let data = [1, 2, 3];
         let mut reader = BitReader::new(&data);
 
-        assert_eq!(reader.read_bytes(4), Err("unexpected end of input".to_string()));
+        assert_eq!(reader.read_bytes(4), Err(Error::UnexpectedEndOfInput));
         assert_eq!(reader.read_bytes(3).unwrap(), &[1, 2, 3]);
     }
 
     #[test]
+    #[should_panic(expected = "reader is not byte-aligned")]
     fn read_bytes_rejects_unaligned_reader() {
         let data = [0xFF, 0xFF];
         let mut reader = BitReader::new(&data);
 
         reader.read_next_bits(3).unwrap();
 
-        assert_eq!(reader.read_bytes(1), Err("reader is not byte-aligned".to_string()));
+        let _ = reader.read_bytes(1);
     }
 
     #[test]

@@ -1,5 +1,6 @@
-﻿use rust_deflate::compression::huffman_decoder::HuffmanDecoder;
-use rust_deflate::io::bit_reader::BitReader;
+use crate::compression::huffman_decoder::HuffmanDecoder;
+use crate::io::bit_reader::BitReader;
+use crate::Error;
 
 #[cfg(test)]
 mod tests {
@@ -41,23 +42,22 @@ mod tests {
             assert_eq!(decoder.decode(&mut reader).unwrap(), 1);
         }
 
-        assert_eq!(decoder.decode(&mut reader), Err("unexpected end of input".to_string()));
+        assert_eq!(decoder.decode(&mut reader), Err(Error::UnexpectedEndOfInput));
     }
 
     #[test]
     fn new_rejects_over_subscribed_code() {
         assert_eq!(
             HuffmanDecoder::new(&[1, 1, 1]).err(),
-            Some("over-subscribed Huffman code".to_string())
+            Some(Error::OverSubscribedCode)
         );
     }
 
     #[test]
+    #[should_panic(expected = "invalid Huffman code length")]
     fn new_rejects_code_length_above_max_bits() {
-        assert_eq!(
-            HuffmanDecoder::new(&[16]).err(),
-            Some("invalid Huffman code length".to_string())
-        );
+        // Can't come from input (lengths are at most 15), so it's an internal assert.
+        let _ = HuffmanDecoder::new(&[16]);
     }
 
     #[test]
@@ -147,7 +147,7 @@ mod tests {
         let data = [0b00000001];
         let mut reader = BitReader::new(&data);
 
-        assert_eq!(decoder.decode(&mut reader), Err("invalid Huffman code".to_string()));
+        assert_eq!(decoder.decode(&mut reader), Err(Error::InvalidCode));
     }
 
     #[test]
@@ -156,7 +156,7 @@ mod tests {
         let data = [0x00, 0xFF];
         let mut reader = BitReader::new(&data);
 
-        assert_eq!(decoder.decode(&mut reader), Err("invalid Huffman code".to_string()));
+        assert_eq!(decoder.decode(&mut reader), Err(Error::InvalidCode));
     }
 
     #[test]
@@ -205,7 +205,7 @@ mod tests {
 
         assert_eq!(
             decoder.rebuild(&[1, 1, 1]),
-            Err("over-subscribed Huffman code".to_string())
+            Err(Error::OverSubscribedCode)
         );
 
         let data = [0b00011010];

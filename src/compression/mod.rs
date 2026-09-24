@@ -1,3 +1,6 @@
-pub mod inflater;
-pub mod huffman_decoder;
+pub(crate) mod inflater;
+pub(crate) mod huffman_decoder;
 mod tables;
+
+#[cfg(test)]
+mod huffman_decoder_tests;
