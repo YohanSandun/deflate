@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 use crate::io::bit_reader::{BitReader};
-use crate::compression::huffman_decoder::{HuffmanDecoder};
+use crate::compression::huffman_decoder::{Alphabet, Entry, HuffmanDecoder};
 
 // Built once per process and shared by every fixed block.
 static FIXED_DECODERS: LazyLock<(HuffmanDecoder, HuffmanDecoder)> = LazyLock::new(|| {
@@ -17,54 +17,14 @@ static FIXED_DECODERS: LazyLock<(HuffmanDecoder, HuffmanDecoder)> = LazyLock::ne
     }
     
     (
-        HuffmanDecoder::new(&lengths).unwrap_or_else(|_| unreachable!()),
-        HuffmanDecoder::new(&distance_length).unwrap_or_else(|_| unreachable!()),
+        HuffmanDecoder::new_for(&lengths, Alphabet::LiteralLength).unwrap_or_else(|_| unreachable!()),
+        HuffmanDecoder::new_for(&distance_length, Alphabet::Distance).unwrap_or_else(|_| unreachable!()),
     )
 });
 
 const MAX_INITIAL_CAPACITY: usize = 64 << 20;
 
-const LENGTH_BASE: [u16; 29] = [
-    3, 4, 5, 6, 7, 8, 9, 10,
-    11, 13, 15, 17,
-    19, 23, 27, 31,
-    35, 43, 51, 59,
-    67, 83, 99, 115,
-    131, 163, 195, 227,
-    258,
-];
-
-const LENGTH_EXTRA_BITS: [u16; 29] = [
-    0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1,
-    2, 2, 2, 2,
-    3, 3, 3, 3,
-    4, 4, 4, 4,
-    5, 5, 5, 5,
-    0
-];
-
-const DISTANCE_BASE: [u16; 30] = [
-    1, 2, 3, 4,
-    5, 7, 9, 13,
-    17, 25, 33, 49,
-    65, 97, 129, 193,
-    257, 385, 513, 769,
-    1025, 1537, 2049, 3073,
-    4097, 6145, 8193, 12289,
-    16385, 24577
-];
-
-const DISTANCE_EXTRA_BITS: [u16; 30] = [
-    0, 0, 0, 0,
-    1, 1, 2, 2,
-    3, 3, 4, 4,
-    5, 5, 6, 6,
-    7, 7, 8, 8,
-    9, 9, 10, 10,
-    11, 11, 12, 12,
-    13, 13
-];
+const OUTPUT_SLACK: usize = 258 + 8;
 
 const CODE_LENGTH_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
@@ -164,8 +124,8 @@ impl<'a> Inflater<'a> {
             return Err("missing end-of-block code".to_string());
         }
 
-        self.literal_length_decoder.rebuild(literal_length_code_lengths)?;
-        self.distance_decoder.rebuild(distance_code_lengths)?;
+        self.literal_length_decoder.rebuild_for(literal_length_code_lengths, Alphabet::LiteralLength)?;
+        self.distance_decoder.rebuild_for(distance_code_lengths, Alphabet::Distance)?;
 
         Self::inflate_block(&mut self.reader, &self.literal_length_decoder, &self.distance_decoder, inflated_data)?;
 
@@ -196,81 +156,107 @@ impl<'a> Inflater<'a> {
 
         Ok(index + repeat)
     }
-    
+
     fn inflate_block(reader: &mut BitReader, literal_length_decoder: &HuffmanDecoder, distance_decoder: &HuffmanDecoder, inflated_data: &mut Vec<u8>) -> Result<(), String> {
-        let mut symbol = literal_length_decoder.decode(reader)?;
+        let result = Self::decode_symbols(reader, literal_length_decoder, distance_decoder, inflated_data);
+        reader.finish_buffered();
+        result
+    }
 
-        while symbol != 256 {
-            if symbol < 256 {
-                inflated_data.push(symbol as u8);
-            } else {
-                let length = Self::decode_length(reader, symbol)?;
-                let distance_symbol = distance_decoder.decode(reader)?;
-                let distance = Self::decode_distance(reader, distance_symbol)?;
-                Self::copy_data_from_earlier(length, distance, inflated_data)?;
+    fn decode_symbols(reader: &mut BitReader, literal_length_decoder: &HuffmanDecoder, distance_decoder: &HuffmanDecoder, inflated_data: &mut Vec<u8>) -> Result<(), String> {
+        let mut pos = inflated_data.len();
+        let result = Self::decode_symbols_into(reader, literal_length_decoder, distance_decoder, inflated_data, &mut pos);
+        inflated_data.truncate(pos);
+        result
+    }
+
+    #[inline(always)]
+    fn decode_symbols_into(reader: &mut BitReader, literal_length_decoder: &HuffmanDecoder, distance_decoder: &HuffmanDecoder, out: &mut Vec<u8>, pos: &mut usize) -> Result<(), String> {
+        loop {
+            if out.len() - *pos < OUTPUT_SLACK {
+                Self::grow_output(out, *pos);
             }
-            symbol = literal_length_decoder.decode(reader)?;
-        }
 
-        Ok(())
+            reader.refill_full();
+
+            let entry = literal_length_decoder.lookup(reader.peek_buffer());
+
+            if entry.kind() == Entry::LITERAL {
+                // Literal run: codes are at most 15 bits, so up to three fit in the
+                // 56 buffered bits without another refill.
+                reader.consume_buffered(entry.code_length())?;
+                out[*pos] = entry.value() as u8;
+                *pos += 1;
+
+                let entry = literal_length_decoder.lookup(reader.peek_buffer());
+                if entry.kind() == Entry::LITERAL {
+                    reader.consume_buffered(entry.code_length())?;
+                    out[*pos] = entry.value() as u8;
+                    *pos += 1;
+
+                    let entry = literal_length_decoder.lookup(reader.peek_buffer());
+                    if entry.kind() == Entry::LITERAL {
+                        reader.consume_buffered(entry.code_length())?;
+                        out[*pos] = entry.value() as u8;
+                        *pos += 1;
+                    }
+                }
+
+                // Anything else needs a full buffer, so refill first.
+                continue;
+            }
+
+            reader.consume_buffered(entry.code_length())?;
+
+            match entry.kind() {
+                Entry::BASE => {
+                    let length = entry.value() + reader.take_buffered(entry.extra_bits())?;
+
+                    let entry = distance_decoder.lookup(reader.peek_buffer());
+                    reader.consume_buffered(entry.code_length())?;
+
+                    if entry.kind() != Entry::BASE {
+                        return Err(entry.error());
+                    }
+
+                    let distance = entry.value() + reader.take_buffered(entry.extra_bits())?;
+                    Self::copy_match(out, *pos, length as usize, distance as usize)?;
+                    *pos += length as usize;
+                }
+                Entry::END_OF_BLOCK => return Ok(()),
+                _ => return Err(entry.error()),
+            }
+        }
     }
 
-    #[inline]
-    fn decode_length(reader: &mut BitReader, symbol: usize) -> Result<u16, String> {
-        let length_index = symbol - 257;
-
-        if length_index >= LENGTH_BASE.len() {
-            return Err("invalid length symbol".to_string());
-        }
-
-        let mut length = LENGTH_BASE[length_index];
-        let extra_bits = LENGTH_EXTRA_BITS[length_index];
-
-        if extra_bits > 0 {
-            length += reader.read_next_bits(extra_bits as u32)? as u16;
-        }
-
-        Ok(length)
+    #[cold]
+    fn grow_output(out: &mut Vec<u8>, pos: usize) {
+        let new_len = (pos + 64 * 1024).min(out.capacity()).max(pos + OUTPUT_SLACK);
+        out.resize(new_len, 0);
     }
 
-    #[inline]
-    fn decode_distance(reader: &mut BitReader, symbol: usize) -> Result<u16, String> {
-        if symbol >= DISTANCE_BASE.len() {
-            return Err("invalid distance symbol".to_string());
-        }
-
-        let mut distance = DISTANCE_BASE[symbol];
-        let extra_bits = DISTANCE_EXTRA_BITS[symbol];
-
-        if extra_bits > 0 {
-            distance += reader.read_next_bits(extra_bits as u32)? as u16;
-        }
-
-        Ok(distance)
-    }
-
-    #[inline]
-    fn copy_data_from_earlier(length: u16, distance: u16, inflated_data: &mut Vec<u8>) -> Result<(), String> {
-        if distance as usize > inflated_data.len() {
+    #[inline(always)]
+    fn copy_match(out: &mut [u8], pos: usize, length: usize, distance: usize) -> Result<(), String> {
+        if distance > pos {
             return Err("invalid distance: too far back".to_string());
         }
 
-        let length = length as usize;
-        let distance = distance as usize;
-        let pos = inflated_data.len() - distance;
+        let src = pos - distance;
 
-        inflated_data.reserve(length);
-
-        if distance >= length {
-            inflated_data.extend_from_within(pos..pos + length);
+        if distance >= 8 {
+            let mut i = 0;
+            while i < length {
+                out.copy_within(src + i..src + i + 8, pos + i);
+                i += 8;
+            }
         } else if distance == 1 {
-            let byte = inflated_data[pos];
-            inflated_data.resize(inflated_data.len() + length, byte);
+            let byte = out[src];
+            out[pos..pos + length].fill(byte);
         } else {
             let mut copied = 0;
             while copied < length {
-                let chunk = (inflated_data.len() - pos).min(length - copied);
-                inflated_data.extend_from_within(pos..pos + chunk);
+                let chunk = (distance + copied).min(length - copied);
+                out.copy_within(src..src + chunk, pos + copied);
                 copied += chunk;
             }
         }

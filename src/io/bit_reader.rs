@@ -26,7 +26,12 @@ impl<'a> BitReader<'a> {
         if self.bit_count >= 32 {
             return;
         }
-        
+
+        self.refill_full();
+    }
+
+    #[inline]
+    pub(crate) fn refill_full(&mut self) {
         if let Some(chunk) = self.data[self.byte_pos..].first_chunk::<8>() {
             // Fast path: one unaligned 8-byte load, keep as many whole bytes as fit.
             let word = u64::from_le_bytes(*chunk);
@@ -84,6 +89,36 @@ impl<'a> BitReader<'a> {
         }
 
         Ok((self.bit_buf & ((1u64 << n) - 1)) as u32)
+    }
+
+    #[inline]
+    pub(crate) fn peek_buffer(&self) -> u64 {
+        self.bit_buf
+    }
+
+    #[inline]
+    pub(crate) fn consume_buffered(&mut self, n: u32) -> Result<(), String> {
+        if n > self.bit_count {
+            return Err("unexpected end of input".to_string());
+        }
+
+        self.bit_buf >>= n;
+        self.bit_count -= n;
+
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn take_buffered(&mut self, n: u32) -> Result<u32, String> {
+        let value = (self.bit_buf & ((1u64 << n) - 1)) as u32;
+        self.consume_buffered(n)?;
+
+        Ok(value)
+    }
+    
+    #[inline]
+    pub(crate) fn finish_buffered(&mut self) {
+        self.refill();
     }
 
     pub fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], String> {

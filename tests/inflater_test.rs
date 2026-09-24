@@ -317,4 +317,55 @@ mod tests {
             Err("missing end-of-block code".to_string())
         );
     }
+
+    #[test]
+    fn inflate_matches_at_every_short_distance() {
+        // ~300 KB built from copies at distances 1..40 (plus far ones) with lengths
+        // 3..258, mostly not multiples of 8, compressed by zlib at level 9. Covers the
+        // 8-byte chunked copy, the overlapping copy, and output growing past 64 KB.
+        let data = include_bytes!("data/matches.deflate");
+        let expected = include_bytes!("data/matches.raw");
+
+        let inflated = Inflater::new(data).inflate().unwrap();
+
+        assert_eq!(inflated.len(), expected.len());
+        assert!(inflated == expected, "inflated output differs from expected data");
+    }
+
+    #[test]
+    fn inflate_rejects_invalid_length_symbol() {
+        // Hand-encoded fixed block: literal 'a', then length symbol 286, which has a
+        // fixed code but no meaning.
+        let data = [0x4B, 0x1C, 0x03, 0x00];
+
+        assert_eq!(Inflater::new(&data).inflate(), Err("invalid length symbol".to_string()));
+    }
+
+    #[test]
+    fn inflate_rejects_invalid_distance_symbol() {
+        // Hand-encoded fixed block: literal 'a', then a length with distance symbol 30.
+        let data = [0x4B, 0x04, 0x3E, 0x00];
+
+        assert_eq!(Inflater::new(&data).inflate(), Err("invalid distance symbol".to_string()));
+    }
+
+    #[test]
+    fn inflate_output_has_no_trailing_slack() {
+        // The decoder writes into a zero-filled buffer with spare room; none of it may
+        // leak into the result, even across several blocks.
+        let data = include_bytes!("data/dynamic_multi.deflate");
+
+        let inflated = Inflater::new(data).inflate().unwrap();
+
+        assert_eq!(inflated.len(), 3000 + 4 * 256 + 6000);
+    }
+
+    #[test]
+    fn inflate_truncated_inside_a_match_fails() {
+        let data = include_bytes!("data/matches.deflate");
+
+        for cut in [data.len() / 3, data.len() / 2, data.len() - 1] {
+            assert!(Inflater::new(&data[..cut]).inflate().is_err(), "cut at {cut} should fail");
+        }
+    }
 }
