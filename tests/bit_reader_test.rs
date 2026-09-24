@@ -1,4 +1,4 @@
-use deflate::io::bit_reader::BitReader;
+use rust_deflate::io::bit_reader::BitReader;
 
 #[cfg(test)]
 mod tests {

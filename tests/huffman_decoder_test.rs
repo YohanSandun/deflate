@@ -1,5 +1,5 @@
-﻿use deflate::compression::huffman_decoder::HuffmanDecoder;
-use deflate::io::bit_reader::BitReader;
+﻿use rust_deflate::compression::huffman_decoder::HuffmanDecoder;
+use rust_deflate::io::bit_reader::BitReader;
 
 #[cfg(test)]
 mod tests {

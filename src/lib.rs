@@ -4,6 +4,3 @@
 //! compression format from scratch.
 pub mod io;
 pub mod compression;
-
-#[cfg(target_arch = "wasm32")]
-mod wasm;

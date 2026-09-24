@@ -1,4 +1,4 @@
-use deflate::compression::inflater::Inflater;
+use rust_deflate::compression::inflater::Inflater;
 
 #[cfg(test)]
 mod tests {
