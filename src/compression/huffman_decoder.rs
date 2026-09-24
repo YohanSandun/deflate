@@ -177,7 +177,7 @@ impl HuffmanDecoder {
             }
 
             let first_length = first.code_length() as usize;
-            
+
             let second = singles[index >> first_length];
             if second.kind() != Entry::LITERAL {
                 continue;

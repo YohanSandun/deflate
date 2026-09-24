@@ -13,6 +13,9 @@
 //! assert_eq!(data, b"hello hello hello hello");
 //! ```
 //!
+//! To decompress many streams, reuse a [`Decompressor`] instead: it keeps its
+//! decoding tables between calls.
+//!
 //! [RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951
 #![forbid(unsafe_code)]
 
@@ -27,6 +30,8 @@ use compression::inflater::Inflater;
 /// Decompresses a raw DEFLATE stream.
 ///
 /// Decoding stops at the end of the final block; any bytes after it are ignored.
+/// To decompress many streams, a reused [`Decompressor`] avoids setting up its
+/// decoding tables each time.
 ///
 /// # Errors
 ///
@@ -40,7 +45,61 @@ use compression::inflater::Inflater;
 /// assert_eq!(decompress(&[]), Err(Error::UnexpectedEndOfInput));
 /// ```
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>, Error> {
-    Inflater::new(data).inflate()
+    Decompressor::new().decompress(data)
+}
+
+/// A reusable DEFLATE decompressor for decompressing many streams.
+///
+/// It keeps its Huffman decoding tables (about 6 KB) and their allocations between
+/// calls, so each stream after the first skips that setup. Streams don't affect
+/// each other: every call starts fresh, even after a call that failed.
+///
+/// ```
+/// use rust_deflate::Decompressor;
+///
+/// // "hello hello hello hello", compressed by zlib as raw DEFLATE.
+/// let compressed = [0xCB, 0x48, 0xCD, 0xC9, 0xC9, 0x57, 0xC8, 0x40, 0x27, 0x01];
+///
+/// let mut decompressor = Decompressor::new();
+/// for _ in 0..3 {
+///     assert_eq!(decompressor.decompress(&compressed).unwrap(), b"hello hello hello hello");
+/// }
+/// ```
+pub struct Decompressor {
+    inflater: Inflater,
+}
+
+impl Decompressor {
+    /// Creates a decompressor.
+    pub fn new() -> Self {
+        Self {
+            inflater: Inflater::new(),
+        }
+    }
+
+    /// Decompresses a raw DEFLATE stream, like [`decompress`].
+    ///
+    /// Decoding stops at the end of the final block; any bytes after it are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] saying what's wrong if the data is corrupt, truncated,
+    /// or not DEFLATE. The decompressor can still be used afterwards.
+    pub fn decompress(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        self.inflater.inflate(data)
+    }
+}
+
+impl Default for Decompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for Decompressor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Decompressor").finish_non_exhaustive()
+    }
 }
 
 // Runs the README's code examples as doctests so they can't go stale.

@@ -19,10 +19,6 @@ impl<'a> BitReader<'a> {
         reader
     }
 
-    pub fn input_len(&self) -> usize {
-        self.data.len()
-    }
-
     #[inline]
     fn refill(&mut self) {
         if self.bit_count >= 32 {

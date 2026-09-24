@@ -50,6 +50,25 @@ match decompress(&[0x07]) {
 `Error` is `#[non_exhaustive]`: new variants may be added in minor releases, so
 keep a catch-all arm when matching on it.
 
+### Many streams
+
+To decompress many streams, reuse one `Decompressor`. It keeps its decoding tables
+between calls, which makes small streams (a few KB or less) noticeably faster.
+Each call is independent, even after one that failed.
+
+```rust
+use rust_deflate::Decompressor;
+
+# let streams: Vec<Vec<u8>> = vec![vec![0xCB, 0x48, 0xCD, 0xC9, 0xC9, 0x57, 0xC8, 0x40, 0x27, 0x01]];
+let mut decompressor = Decompressor::new();
+
+for compressed in &streams {
+    let data = decompressor.decompress(compressed)?;
+    // ...
+}
+# Ok::<(), rust_deflate::Error>(())
+```
+
 ## Input format
 
 The input must be **raw DEFLATE**, with no zlib ([RFC 1950]) or gzip ([RFC 1952])

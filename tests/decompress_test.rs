@@ -1,4 +1,4 @@
-use rust_deflate::{Error, decompress};
+use rust_deflate::{Decompressor, Error, decompress};
 
 #[cfg(test)]
 mod tests {
@@ -348,5 +348,118 @@ mod tests {
                 "cut at {cut} should fail"
             );
         }
+    }
+
+    // Streams covering every block type, with different dynamic tables.
+    fn mixed_streams() -> Vec<(&'static str, Vec<u8>, Vec<u8>)> {
+        let mut multi_expected = include_bytes!("data/dynamic_text.txt")[..3000].to_vec();
+        for _ in 0..4 {
+            multi_expected.extend(0..=255u8);
+        }
+        multi_expected.extend(&include_bytes!("data/dynamic_text.txt")[3000..9000]);
+
+        vec![
+            (
+                "dynamic text",
+                include_bytes!("data/dynamic_text.deflate").to_vec(),
+                include_bytes!("data/dynamic_text.txt").to_vec(),
+            ),
+            (
+                "fixed text",
+                include_bytes!("data/fixed_text.deflate").to_vec(),
+                include_bytes!("data/fixed_text.txt").to_vec(),
+            ),
+            (
+                "matches",
+                include_bytes!("data/matches.deflate").to_vec(),
+                include_bytes!("data/matches.raw").to_vec(),
+            ),
+            (
+                "three dynamic blocks",
+                include_bytes!("data/dynamic_multi.deflate").to_vec(),
+                multi_expected,
+            ),
+            (
+                "stored then fixed",
+                vec![
+                    0x00, 0x05, 0x00, 0xFA, 0xFF, b'1', b'2', b'3', b'4', b'5', 0xCB, 0x48, 0xCD,
+                    0xC9, 0xC9, 0x57, 0xC8, 0x40, 0x27, 0x01,
+                ],
+                b"12345hello hello hello hello".to_vec(),
+            ),
+            (
+                "empty stored",
+                vec![0x01, 0x00, 0x00, 0xFF, 0xFF],
+                Vec::new(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn decompressor_reused_across_streams() {
+        let streams = mixed_streams();
+        let mut decompressor = Decompressor::new();
+
+        // Every stream after every other one, so each sees tables left by a different stream.
+        for _ in 0..2 {
+            for (name, compressed, expected) in &streams {
+                let output = decompressor.decompress(compressed).unwrap();
+                assert!(output == *expected, "{name}: wrong output");
+            }
+            for (name, compressed, expected) in streams.iter().rev() {
+                let output = decompressor.decompress(compressed).unwrap();
+                assert!(output == *expected, "{name}: wrong output (reverse order)");
+            }
+        }
+    }
+
+    #[test]
+    fn decompressor_works_after_errors() {
+        let streams = mixed_streams();
+        let dynamic = &streams[0].1;
+        let mut decompressor = Decompressor::new();
+
+        // Fail at different points: bad block type, inside a dynamic header (tables
+        // half rebuilt), and in the middle of the data.
+        let failures: [&[u8]; 4] = [
+            &[0x07],
+            &dynamic[..3],
+            &dynamic[..20],
+            &dynamic[..dynamic.len() / 2],
+        ];
+
+        for failing in failures {
+            assert!(decompressor.decompress(failing).is_err());
+
+            for (name, compressed, expected) in &streams {
+                let output = decompressor.decompress(compressed).unwrap();
+                assert!(output == *expected, "{name}: wrong output after an error");
+            }
+        }
+    }
+
+    #[test]
+    fn decompressor_matches_decompress_function() {
+        let mut decompressor = Decompressor::default();
+
+        for (name, compressed, _) in mixed_streams() {
+            assert_eq!(
+                decompressor.decompress(&compressed),
+                decompress(&compressed),
+                "{name}"
+            );
+        }
+
+        for bad in [&[0x07][..], &[], &[0x4B, 0x04, 0x42, 0x00]] {
+            assert_eq!(decompressor.decompress(bad), decompress(bad));
+        }
+    }
+
+    #[test]
+    fn decompressor_is_send_sync_and_debug() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Decompressor>();
+
+        assert_eq!(format!("{:?}", Decompressor::new()), "Decompressor { .. }");
     }
 }

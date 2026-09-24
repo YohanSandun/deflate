@@ -587,12 +587,4 @@ mod tests {
 
         let _ = reader.read_bytes(1);
     }
-
-    #[test]
-    fn input_len_returns_input_size() {
-        let data = [0u8; 13];
-        let reader = BitReader::new(&data);
-
-        assert_eq!(reader.input_len(), 13);
-    }
 }
