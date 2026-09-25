@@ -36,6 +36,11 @@ const CODE_LENGTH_ORDER: [usize; 19] = [
 const MAX_LITERAL_LENGTH_CODES: usize = 286;
 const MAX_DISTANCE_CODES: usize = 30;
 
+pub(crate) struct Inflated {
+    pub(crate) input_used: usize,
+    pub(crate) output_added: usize,
+}
+
 pub(crate) struct Inflater {
     code_length_decoder: HuffmanDecoder,
     literal_length_decoder: HuffmanDecoder,
@@ -57,11 +62,18 @@ impl Inflater {
         Ok(inflated_data)
     }
 
-    pub(crate) fn inflate_into(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<usize, Error> {
+    pub(crate) fn inflate_into(
+        &mut self,
+        data: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<Inflated, Error> {
         let stream_start = out.len();
 
         match self.inflate_blocks(data, out, stream_start) {
-            Ok(()) => Ok(out.len() - stream_start),
+            Ok(input_used) => Ok(Inflated {
+                input_used,
+                output_added: out.len() - stream_start,
+            }),
             Err(error) => {
                 out.truncate(stream_start);
                 Err(error)
@@ -74,7 +86,7 @@ impl Inflater {
         data: &[u8],
         out: &mut Vec<u8>,
         stream_start: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         let mut reader = BitReader::new(data);
 
         out.reserve(data.len().saturating_mul(4).min(MAX_INITIAL_CAPACITY));
@@ -92,7 +104,8 @@ impl Inflater {
             }
         }
 
-        Ok(())
+        reader.align_to_byte();
+        Ok(reader.position())
     }
 
     fn inflate_stored_block(

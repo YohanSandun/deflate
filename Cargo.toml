@@ -1,13 +1,13 @@
 [package]
 name = "rust-deflate"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A DEFLATE (RFC 1951) decompressor written from scratch in Rust."
+description = "A DEFLATE (RFC 1951) and zlib (RFC 1950) decompressor written from scratch in Rust."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/YohanSandun/deflate"
-keywords = ["deflate", "inflate", "decompression", "compression", "rfc1951"]
+keywords = ["deflate", "zlib", "inflate", "decompression", "compression"]
 categories = ["compression"]
 
 [dependencies]

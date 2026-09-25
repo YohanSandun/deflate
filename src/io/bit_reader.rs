@@ -159,6 +159,11 @@ impl<'a> BitReader<'a> {
 
         Ok(())
     }
+
+    pub(crate) fn position(&self) -> usize {
+        debug_assert!(self.bit_count % 8 == 0, "call align_to_byte first");
+        self.byte_pos - (self.bit_count / 8) as usize
+    }
 }
 
 #[cfg(test)]

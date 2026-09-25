@@ -33,6 +33,16 @@ pub enum Error {
     InvalidDistanceSymbol,
     /// A match refers back past the start of the output.
     DistanceTooFarBack,
+    /// Invalid FCHECK in zlib header
+    InvalidFcheck,
+    /// Preset dictionary is set in zlib header; not supported
+    PresetDictionary,
+    /// Adler32 checksum mismatch
+    ChecksumMismatch,
+    /// The zlib header's compression method isn't DEFLATE (method 8).
+    UnsupportedCompressionMethod,
+    /// The zlib header declares a window larger than 32 KB (CINFO above 7).
+    InvalidWindowSize,
 }
 
 impl fmt::Display for Error {
@@ -50,6 +60,11 @@ impl fmt::Display for Error {
             Error::InvalidLengthSymbol => "invalid length symbol",
             Error::InvalidDistanceSymbol => "invalid distance symbol",
             Error::DistanceTooFarBack => "invalid distance: too far back",
+            Error::InvalidFcheck => "invalid fcheck",
+            Error::PresetDictionary => "preset dictionary is not supported",
+            Error::ChecksumMismatch => "checksum mismatch",
+            Error::UnsupportedCompressionMethod => "unsupported compression method",
+            Error::InvalidWindowSize => "invalid window size",
         })
     }
 }
