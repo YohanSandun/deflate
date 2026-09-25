@@ -8,7 +8,7 @@ A DEFLATE ([RFC 1951]) and zlib ([RFC 1950]) decompressor written from scratch i
 - Streams data of any size in constant memory, through `std::io::Read` or by pushing
   chunks in as they arrive.
 - Malformed input returns an error; it never panics.
-- Builds for `wasm32-unknown-unknown`, so it can sit behind a WebAssembly/JS wrapper.
+- Builds for `wasm32`, so it can sit behind a WebAssembly/JS wrapper.
 
 ## Installation
 
@@ -20,7 +20,7 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-rust-deflate = "0.2"
+rust-deflate = "0.3"
 ```
 
 The crate is imported as `rust_deflate`.
