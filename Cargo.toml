@@ -11,3 +11,6 @@ keywords = ["deflate", "zlib", "inflate", "decompression", "compression"]
 categories = ["compression"]
 
 [dependencies]
+
+[profile.test]
+opt-level = 1
