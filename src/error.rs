@@ -43,6 +43,10 @@ pub enum Error {
     UnsupportedCompressionMethod,
     /// The zlib header declares a window larger than 32 KB (CINFO above 7).
     InvalidWindowSize,
+    /// The data decompresses to more than the `max_output` set in [`OutputOptions`].
+    ///
+    /// [`OutputOptions`]: crate::OutputOptions
+    OutputLimitExceeded,
 }
 
 impl fmt::Display for Error {
@@ -65,6 +69,7 @@ impl fmt::Display for Error {
             Error::ChecksumMismatch => "checksum mismatch",
             Error::UnsupportedCompressionMethod => "unsupported compression method",
             Error::InvalidWindowSize => "invalid window size",
+            Error::OutputLimitExceeded => "output limit exceeded",
         })
     }
 }

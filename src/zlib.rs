@@ -1,6 +1,6 @@
 use crate::Error;
 use crate::checksum::adler32;
-use crate::compression::inflater::Inflater;
+use crate::compression::inflater::{Inflater, OutputSize};
 
 fn is_fcheck_valid(data: &[u8]) -> bool {
     (((data[0] as u16) << 8) | data[1] as u16) % 31 == 0
@@ -26,16 +26,11 @@ fn read_adler32_checksum(data: &[u8]) -> Result<u32, Error> {
     Ok(u32::from_be_bytes(*bytes))
 }
 
-pub(crate) fn inflate(inflater: &mut Inflater, data: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut inflated_data = Vec::new();
-    inflate_into(inflater, data, &mut inflated_data)?;
-    Ok(inflated_data)
-}
-
 pub(crate) fn inflate_into(
     inflater: &mut Inflater,
     data: &[u8],
     out: &mut Vec<u8>,
+    size: OutputSize,
 ) -> Result<usize, Error> {
     if data.len() < 3 {
         return Err(Error::UnexpectedEndOfInput);
@@ -60,7 +55,7 @@ pub(crate) fn inflate_into(
     let stream_start = out.len();
     let body = &data[2..];
 
-    let inflated = inflater.inflate_into(body, out)?;
+    let inflated = inflater.inflate_into(body, out, size)?;
 
     let checksum = match read_adler32_checksum(&body[inflated.input_used..]) {
         Ok(checksum) => checksum,

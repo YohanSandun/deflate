@@ -19,6 +19,13 @@ All notable changes to this project are documented here. The format is based on
   caller-provided `Vec<u8>` so the output buffer can be reused as well. They return
   the number of bytes added, truncate the `Vec` back to its original length on
   error, and never let a stream refer back into bytes that were already in it.
+- `_with` variants of every function and method (`decompress_with`,
+  `decompress_zlib_with`, and on `Decompressor` also `decompress_into_with` and
+  `decompress_zlib_into_with`), which take `OutputOptions`; the versions without
+  `_with` use the defaults. `max_output` fails with the new
+  `Error::OutputLimitExceeded` as soon as a stream would exceed a size limit
+  (protecting against decompression bombs), `size_hint` allocates the output buffer
+  up front, and `exact` sets both.
 - New `Error` variants for zlib: `UnsupportedCompressionMethod`,
   `InvalidWindowSize`, `InvalidFcheck`, `PresetDictionary` and `ChecksumMismatch`.
 

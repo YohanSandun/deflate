@@ -41,6 +41,21 @@ pub(crate) struct Inflated {
     pub(crate) output_added: usize,
 }
 
+/// How much output a call may produce and how much to allocate for it up front.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct OutputSize {
+    pub(crate) max_output: Option<usize>,
+    pub(crate) size_hint: Option<usize>,
+}
+
+// Where this stream's output starts in `out` (matches can't reach before it) and the
+// position in `out` it must not pass.
+#[derive(Clone, Copy)]
+struct Bounds {
+    stream_start: usize,
+    limit: usize,
+}
+
 pub(crate) struct Inflater {
     code_length_decoder: HuffmanDecoder,
     literal_length_decoder: HuffmanDecoder,
@@ -56,20 +71,23 @@ impl Inflater {
         }
     }
 
-    pub(crate) fn inflate(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut inflated_data = Vec::new();
-        self.inflate_into(data, &mut inflated_data)?;
-        Ok(inflated_data)
-    }
-
     pub(crate) fn inflate_into(
         &mut self,
         data: &[u8],
         out: &mut Vec<u8>,
+        size: OutputSize,
     ) -> Result<Inflated, Error> {
         let stream_start = out.len();
+        let bounds = Bounds {
+            stream_start,
+            limit: size
+                .max_output
+                .map_or(usize::MAX, |max| stream_start.saturating_add(max)),
+        };
 
-        match self.inflate_blocks(data, out, stream_start) {
+        Self::reserve_output(data, out, size);
+
+        match self.inflate_blocks(data, out, bounds) {
             Ok(input_used) => Ok(Inflated {
                 input_used,
                 output_added: out.len() - stream_start,
@@ -81,15 +99,30 @@ impl Inflater {
         }
     }
 
+    // With a size hint, reserves exactly that plus the loop's working room, so the
+    // buffer never has to grow. Otherwise guesses 4x the input, capped by the limit.
+    // Either way it's a no-op when `out` already has the room.
+    fn reserve_output(data: &[u8], out: &mut Vec<u8>, size: OutputSize) {
+        let max = size.max_output.unwrap_or(usize::MAX);
+
+        match size.size_hint {
+            Some(hint) => out.reserve_exact(hint.min(max).saturating_add(OUTPUT_SLACK)),
+            None => out.reserve(
+                data.len()
+                    .saturating_mul(4)
+                    .min(MAX_INITIAL_CAPACITY)
+                    .min(max.saturating_add(OUTPUT_SLACK)),
+            ),
+        }
+    }
+
     fn inflate_blocks(
         &mut self,
         data: &[u8],
         out: &mut Vec<u8>,
-        stream_start: usize,
+        bounds: Bounds,
     ) -> Result<usize, Error> {
         let mut reader = BitReader::new(data);
-
-        out.reserve(data.len().saturating_mul(4).min(MAX_INITIAL_CAPACITY));
 
         let mut b_final = 0u8;
         while b_final == 0 {
@@ -97,9 +130,9 @@ impl Inflater {
             let b_type = reader.read_next_bits(2)?;
 
             match b_type {
-                0 => Self::inflate_stored_block(&mut reader, out)?,
-                1 => Self::inflate_fixed_huffman_block(&mut reader, out, stream_start)?,
-                2 => self.inflate_dynamic_huffman_block(&mut reader, out, stream_start)?,
+                0 => Self::inflate_stored_block(&mut reader, out, bounds)?,
+                1 => Self::inflate_fixed_huffman_block(&mut reader, out, bounds)?,
+                2 => self.inflate_dynamic_huffman_block(&mut reader, out, bounds)?,
                 _ => return Err(Error::InvalidBlockType),
             }
         }
@@ -111,6 +144,7 @@ impl Inflater {
     fn inflate_stored_block(
         reader: &mut BitReader,
         inflated_data: &mut Vec<u8>,
+        bounds: Bounds,
     ) -> Result<(), Error> {
         reader.align_to_byte();
 
@@ -121,7 +155,13 @@ impl Inflater {
             return Err(Error::StoredLengthMismatch);
         }
 
-        inflated_data.extend_from_slice(reader.read_bytes(len as usize)?);
+        let bytes = reader.read_bytes(len as usize)?;
+
+        if inflated_data.len() + bytes.len() > bounds.limit {
+            return Err(Error::OutputLimitExceeded);
+        }
+
+        inflated_data.extend_from_slice(bytes);
 
         Ok(())
     }
@@ -129,7 +169,7 @@ impl Inflater {
     fn inflate_fixed_huffman_block(
         reader: &mut BitReader,
         inflated_data: &mut Vec<u8>,
-        stream_start: usize,
+        bounds: Bounds,
     ) -> Result<(), Error> {
         let (literal_length_decoder, distance_decoder) = &*FIXED_DECODERS;
 
@@ -138,7 +178,7 @@ impl Inflater {
             literal_length_decoder,
             distance_decoder,
             inflated_data,
-            stream_start,
+            bounds,
         )?;
 
         Ok(())
@@ -148,7 +188,7 @@ impl Inflater {
         &mut self,
         reader: &mut BitReader,
         inflated_data: &mut Vec<u8>,
-        stream_start: usize,
+        bounds: Bounds,
     ) -> Result<(), Error> {
         let hlit = reader.read_next_bits(5)? as usize + 257;
         let hdist = reader.read_next_bits(5)? as usize + 1;
@@ -197,7 +237,7 @@ impl Inflater {
             &self.literal_length_decoder,
             &self.distance_decoder,
             inflated_data,
-            stream_start,
+            bounds,
         )?;
 
         Ok(())
@@ -241,14 +281,14 @@ impl Inflater {
         literal_length_decoder: &HuffmanDecoder,
         distance_decoder: &HuffmanDecoder,
         inflated_data: &mut Vec<u8>,
-        stream_start: usize,
+        bounds: Bounds,
     ) -> Result<(), Error> {
         let result = Self::decode_symbols(
             reader,
             literal_length_decoder,
             distance_decoder,
             inflated_data,
-            stream_start,
+            bounds,
         );
         reader.finish_buffered();
         result
@@ -259,7 +299,7 @@ impl Inflater {
         literal_length_decoder: &HuffmanDecoder,
         distance_decoder: &HuffmanDecoder,
         inflated_data: &mut Vec<u8>,
-        stream_start: usize,
+        bounds: Bounds,
     ) -> Result<(), Error> {
         let mut pos = inflated_data.len();
         let result = Self::decode_symbols_into(
@@ -268,7 +308,7 @@ impl Inflater {
             distance_decoder,
             inflated_data,
             &mut pos,
-            stream_start,
+            bounds,
         );
         inflated_data.truncate(pos);
         result
@@ -281,14 +321,21 @@ impl Inflater {
         distance_decoder: &HuffmanDecoder,
         out: &mut Vec<u8>,
         pos: &mut usize,
-        stream_start: usize,
+        bounds: Bounds,
     ) -> Result<(), Error> {
         reader.refill_full();
         let mut entry = literal_length_decoder.lookup(reader.peek_buffer());
 
         loop {
+            // The limit is only checked here and at the end of the block, off the fast
+            // path: `grow_output` never grows `out` past `limit + OUTPUT_SLACK`, so once
+            // `pos` passes the limit, the room left drops below `OUTPUT_SLACK` and this
+            // branch is taken before any further growth.
             if out.len() - *pos < OUTPUT_SLACK {
-                Self::grow_output(out, *pos);
+                if *pos > bounds.limit {
+                    return Err(Error::OutputLimitExceeded);
+                }
+                Self::grow_output(out, *pos, bounds.limit);
             }
 
             if entry.kind() == Entry::LITERAL {
@@ -336,10 +383,15 @@ impl Inflater {
                     reader.refill_full();
                     entry = literal_length_decoder.lookup(reader.peek_buffer());
 
-                    Self::copy_match(out, *pos, length as usize, distance as usize, stream_start)?;
+                    Self::copy_match(out, *pos, length as usize, distance as usize, bounds)?;
                     *pos += length as usize;
                 }
-                Entry::END_OF_BLOCK => return Ok(()),
+                Entry::END_OF_BLOCK => {
+                    if *pos > bounds.limit {
+                        return Err(Error::OutputLimitExceeded);
+                    }
+                    return Ok(());
+                }
                 _ => return Err(entry.error()),
             }
         }
@@ -353,9 +405,10 @@ impl Inflater {
     }
 
     #[cold]
-    fn grow_output(out: &mut Vec<u8>, pos: usize) {
+    fn grow_output(out: &mut Vec<u8>, pos: usize, limit: usize) {
         let new_len = (pos + 64 * 1024)
             .min(out.capacity())
+            .min(limit.saturating_add(OUTPUT_SLACK))
             .max(pos + OUTPUT_SLACK);
         out.resize(new_len, 0);
     }
@@ -366,9 +419,9 @@ impl Inflater {
         pos: usize,
         length: usize,
         distance: usize,
-        stream_start: usize,
+        bounds: Bounds,
     ) -> Result<(), Error> {
-        if distance > pos - stream_start {
+        if distance > pos - bounds.stream_start {
             return Err(Error::DistanceTooFarBack);
         }
 
