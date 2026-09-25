@@ -26,31 +26,36 @@ fn read_adler32_checksum(data: &[u8]) -> Result<u32, Error> {
     Ok(u32::from_be_bytes(*bytes))
 }
 
+pub(crate) fn check_header(header: &[u8; 2]) -> Result<(), Error> {
+    if !is_deflate(header) {
+        return Err(Error::UnsupportedCompressionMethod);
+    }
+
+    if !is_window_size_valid(header) {
+        return Err(Error::InvalidWindowSize);
+    }
+
+    if !is_fcheck_valid(header) {
+        return Err(Error::InvalidFcheck);
+    }
+
+    if has_preset_dictionary(header) {
+        return Err(Error::PresetDictionary);
+    }
+
+    Ok(())
+}
+
 pub(crate) fn inflate_into(
     inflater: &mut Inflater,
     data: &[u8],
     out: &mut Vec<u8>,
     size: OutputSize,
 ) -> Result<usize, Error> {
-    if data.len() < 3 {
+    let Some(header) = data.first_chunk::<2>() else {
         return Err(Error::UnexpectedEndOfInput);
-    }
-
-    if !is_deflate(data) {
-        return Err(Error::UnsupportedCompressionMethod);
-    }
-
-    if !is_window_size_valid(data) {
-        return Err(Error::InvalidWindowSize);
-    }
-
-    if !is_fcheck_valid(data) {
-        return Err(Error::InvalidFcheck);
-    }
-
-    if has_preset_dictionary(data) {
-        return Err(Error::PresetDictionary);
-    }
+    };
+    check_header(header)?;
 
     let stream_start = out.len();
     let body = &data[2..];

@@ -26,6 +26,14 @@ All notable changes to this project are documented here. The format is based on
   `Error::OutputLimitExceeded` as soon as a stream would exceed a size limit
   (protecting against decompression bombs), `size_hint` allocates the output buffer
   up front, and `exact` sets both.
+- Streaming: `ZlibDecoder` and `DeflateDecoder` wrap any `std::io::Read` source and
+  implement `Read`, decompressing data of any size in constant memory (under 400 KB
+  of buffers).
+- `StreamDecompressor`, a push-based streaming decompressor for raw DEFLATE and
+  zlib: `push` chunks of any size as they arrive and get back everything they
+  decompress to (output is never held back waiting for more input), `finish` at
+  the end, `reset` to reuse it.
+- `impl From<Error> for std::io::Error`.
 - New `Error` variants for zlib: `UnsupportedCompressionMethod`,
   `InvalidWindowSize`, `InvalidFcheck`, `PresetDictionary` and `ChecksumMismatch`.
 

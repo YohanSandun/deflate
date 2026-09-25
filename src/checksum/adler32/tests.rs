@@ -1,4 +1,4 @@
-use super::compute_adler32;
+use super::{Adler32, compute_adler32};
 
 #[test]
 fn empty_input_is_one() {
@@ -60,4 +60,27 @@ fn matches_reference_around_block_and_chunk_boundaries() {
             "0xFF, len {len}"
         );
     }
+}
+
+#[test]
+fn incremental_updates_match_one_shot_for_any_split() {
+    let data: Vec<u8> = (0..30_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    let expected = compute_adler32(&data);
+
+    // Splits at every block remainder, around the 5552-byte reduction points, and
+    // many small pieces.
+    for split in (0..=20).chain([5551, 5552, 5553, 11104, 29_999]) {
+        let mut adler = Adler32::new();
+        adler.update(&data[..split]);
+        adler.update(&data[split..]);
+        assert_eq!(adler.finish(), expected, "split at {split}");
+    }
+
+    let mut adler = Adler32::new();
+    for piece in data.chunks(7) {
+        adler.update(piece);
+    }
+    assert_eq!(adler.finish(), expected, "7-byte pieces");
 }

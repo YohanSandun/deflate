@@ -5,6 +5,8 @@ A DEFLATE ([RFC 1951]) and zlib ([RFC 1950]) decompressor written from scratch i
 - No dependencies and no `unsafe` code (`#![forbid(unsafe_code)]`).
 - Supports all three block types: stored, fixed Huffman and dynamic Huffman.
 - Decodes raw DEFLATE, and zlib streams with their Adler-32 checksum verified.
+- Streams data of any size in constant memory, through `std::io::Read` or by pushing
+  chunks in as they arrive.
 - Malformed input returns an error; it never panics.
 - Builds for `wasm32-unknown-unknown`, so it can sit behind a WebAssembly/JS wrapper.
 
@@ -161,6 +163,54 @@ let data = decompress_zlib_with(&untrusted, OutputOptions::new().max_output(16 <
 The size hint is allocated before any data is decoded, so cap it if it comes from
 untrusted input (a limit caps it too).
 
+### Streaming large data
+
+For data too large to hold in memory, `ZlibDecoder` and `DeflateDecoder` wrap any
+`std::io::Read` source and implement `Read` themselves. They read compressed input as
+needed and keep under 400 KB of buffers however large the stream is, so a
+multi-gigabyte file decompresses in constant memory:
+
+```rust,no_run
+use std::fs::File;
+use rust_deflate::ZlibDecoder;
+
+let mut decoder = ZlibDecoder::new(File::open("huge.zz")?);
+std::io::copy(&mut decoder, &mut File::create("huge.bin")?)?;
+# Ok::<(), std::io::Error>(())
+```
+
+Errors come back as `std::io::Error`: `UnexpectedEof` for truncated data and
+`InvalidData` for corrupt data, with the `rust_deflate::Error` inside
+(`error.get_ref()` and `downcast_ref`). A zlib checksum can only be checked at the
+end, so treat streamed output as untrusted until the last read returns 0. The
+decoders may read past the end of the compressed stream from their source.
+
+### Pushing chunks as they arrive
+
+When the data doesn't come from a `Read` source (network callbacks, a
+WebAssembly/JS wrapper), push it into a `StreamDecompressor` instead. Each `push`
+appends everything its chunk lets the decoder produce, so output is never held back
+waiting for more input: a zlib stream split by sync flushes (as used by WebSocket
+compression) gives each message's output as soon as its bytes are pushed.
+
+```rust
+use rust_deflate::StreamDecompressor;
+
+# let chunks: Vec<Vec<u8>> = vec![vec![0x78, 0x9C, 0xCB, 0x48, 0xCD, 0xC9, 0xC9, 0x57], vec![0xC8, 0x40, 0x27, 0x01, 0x68, 0x03, 0x08, 0xB1]];
+let mut stream = StreamDecompressor::zlib(); // or ::deflate()
+let mut out = Vec::new();
+
+for chunk in &chunks {
+    stream.push(chunk, &mut out)?;
+    // use `out`, then out.clear() to keep memory flat
+}
+stream.finish(&mut out)?; // no more input: fails if the stream is incomplete
+# Ok::<(), rust_deflate::Error>(())
+```
+
+`reset()` starts a new stream reusing the same buffers. Errors are
+`rust_deflate::Error`; after one, every call returns it until `reset()`.
+
 ## Input formats
 
 ### Raw DEFLATE: `decompress`
@@ -196,7 +246,6 @@ are ignored.
 - gzip ([RFC 1952])
 - zlib preset dictionaries
 - Compression
-- Streaming (the whole input must be in memory, and the output is returned in one piece)
 
 ## Minimum supported Rust version
 

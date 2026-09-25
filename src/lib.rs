@@ -17,19 +17,29 @@
 //! To decompress many streams, reuse a [`Decompressor`] instead: it keeps its
 //! decoding tables between calls.
 //!
+//! To decompress data too large to hold in memory, such as a multi-gigabyte file,
+//! wrap any [`std::io::Read`] source in a [`ZlibDecoder`] or [`DeflateDecoder`].
+//! They decompress in constant memory. When data arrives in pieces instead (network
+//! callbacks, a WebAssembly wrapper), push it into a [`StreamDecompressor`].
+//!
 //! [RFC 1950]: https://www.rfc-editor.org/rfc/rfc1950
 //! [RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951
 #![forbid(unsafe_code)]
 
 mod checksum;
 mod compression;
+mod decoder;
 mod error;
 mod io;
 mod options;
+mod stream;
+mod stream_decompressor;
 mod zlib;
 
+pub use decoder::{DeflateDecoder, ZlibDecoder};
 pub use error::Error;
 pub use options::OutputOptions;
+pub use stream_decompressor::StreamDecompressor;
 
 use compression::inflater::Inflater;
 

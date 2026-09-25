@@ -75,3 +75,18 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// For the streaming decoders' [`std::io::Read`] impls, and for use with `?` in
+/// functions returning `std::io::Result`. Truncated data maps to
+/// [`std::io::ErrorKind::UnexpectedEof`], everything else to
+/// [`std::io::ErrorKind::InvalidData`]; the original `Error` is kept inside and can be
+/// recovered with [`std::io::Error::get_ref`] and `downcast_ref`.
+impl From<Error> for std::io::Error {
+    fn from(error: Error) -> Self {
+        let kind = match error {
+            Error::UnexpectedEndOfInput => std::io::ErrorKind::UnexpectedEof,
+            _ => std::io::ErrorKind::InvalidData,
+        };
+        std::io::Error::new(kind, error)
+    }
+}

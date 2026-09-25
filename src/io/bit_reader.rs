@@ -1,5 +1,6 @@
 use crate::Error;
 
+#[derive(Clone)]
 pub struct BitReader<'a> {
     data: &'a [u8],
     byte_pos: usize,
@@ -163,6 +164,30 @@ impl<'a> BitReader<'a> {
     pub(crate) fn position(&self) -> usize {
         debug_assert!(self.bit_count % 8 == 0, "call align_to_byte first");
         self.byte_pos - (self.bit_count / 8) as usize
+    }
+    
+    pub(crate) fn at_bit(data: &'a [u8], bit_position: usize) -> Self {
+        debug_assert!(bit_position <= data.len() * 8);
+
+        let mut reader = Self {
+            data,
+            byte_pos: bit_position / 8,
+            bit_buf: 0,
+            bit_count: 0,
+        };
+        reader.refill();
+
+        reader.consume((bit_position % 8) as u32);
+        reader
+    }
+    
+    pub(crate) fn bit_position(&self) -> usize {
+        self.byte_pos * 8 - self.bit_count as usize
+    }
+
+    #[inline]
+    pub(crate) fn buffered_bits(&self) -> u32 {
+        self.bit_count
     }
 }
 

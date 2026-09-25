@@ -36,20 +36,28 @@ const CODE_LENGTH_ORDER: [usize; 19] = [
 const MAX_LITERAL_LENGTH_CODES: usize = 286;
 const MAX_DISTANCE_CODES: usize = 30;
 
+const MAX_SYMBOL_BITS: u32 = 48;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Progress {
+    EndOfBlock,
+    /// Streaming only: fewer than `MAX_SYMBOL_BITS` of input are left.
+    NeedInput,
+    /// Streaming only: the output passed the limit for this call.
+    OutputFull,
+}
+
 pub(crate) struct Inflated {
     pub(crate) input_used: usize,
     pub(crate) output_added: usize,
 }
 
-/// How much output a call may produce and how much to allocate for it up front.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct OutputSize {
     pub(crate) max_output: Option<usize>,
     pub(crate) size_hint: Option<usize>,
 }
 
-// Where this stream's output starts in `out` (matches can't reach before it) and the
-// position in `out` it must not pass.
 #[derive(Clone, Copy)]
 struct Bounds {
     stream_start: usize,
@@ -146,16 +154,8 @@ impl Inflater {
         inflated_data: &mut Vec<u8>,
         bounds: Bounds,
     ) -> Result<(), Error> {
-        reader.align_to_byte();
-
-        let len = reader.read_next_bits(16)?;
-        let n_len = reader.read_next_bits(16)?;
-
-        if len ^ n_len != 0xFFFF {
-            return Err(Error::StoredLengthMismatch);
-        }
-
-        let bytes = reader.read_bytes(len as usize)?;
+        let len = Self::read_stored_length(reader)?;
+        let bytes = reader.read_bytes(len)?;
 
         if inflated_data.len() + bytes.len() > bounds.limit {
             return Err(Error::OutputLimitExceeded);
@@ -166,6 +166,19 @@ impl Inflater {
         Ok(())
     }
 
+    pub(crate) fn read_stored_length(reader: &mut BitReader) -> Result<usize, Error> {
+        reader.align_to_byte();
+
+        let len = reader.read_next_bits(16)?;
+        let n_len = reader.read_next_bits(16)?;
+
+        if len ^ n_len != 0xFFFF {
+            return Err(Error::StoredLengthMismatch);
+        }
+
+        Ok(len as usize)
+    }
+
     fn inflate_fixed_huffman_block(
         reader: &mut BitReader,
         inflated_data: &mut Vec<u8>,
@@ -173,12 +186,13 @@ impl Inflater {
     ) -> Result<(), Error> {
         let (literal_length_decoder, distance_decoder) = &*FIXED_DECODERS;
 
-        Self::inflate_block(
+        Self::inflate_block::<false>(
             reader,
             literal_length_decoder,
             distance_decoder,
             inflated_data,
             bounds,
+            true,
         )?;
 
         Ok(())
@@ -190,6 +204,21 @@ impl Inflater {
         inflated_data: &mut Vec<u8>,
         bounds: Bounds,
     ) -> Result<(), Error> {
+        self.read_dynamic_header(reader)?;
+
+        Self::inflate_block::<false>(
+            reader,
+            &self.literal_length_decoder,
+            &self.distance_decoder,
+            inflated_data,
+            bounds,
+            true,
+        )?;
+
+        Ok(())
+    }
+
+    pub(crate) fn read_dynamic_header(&mut self, reader: &mut BitReader) -> Result<(), Error> {
         let hlit = reader.read_next_bits(5)? as usize + 257;
         let hdist = reader.read_next_bits(5)? as usize + 1;
         let hclen = reader.read_next_bits(4)? as usize + 4;
@@ -232,15 +261,37 @@ impl Inflater {
         self.distance_decoder
             .rebuild_for(distance_code_lengths, Alphabet::Distance)?;
 
-        Self::inflate_block(
-            reader,
-            &self.literal_length_decoder,
-            &self.distance_decoder,
-            inflated_data,
-            bounds,
-        )?;
-
         Ok(())
+    }
+    
+    pub(crate) fn decode_block_streaming(
+        &self,
+        reader: &mut BitReader,
+        fixed: bool,
+        out: &mut Vec<u8>,
+        limit: usize,
+        input_finished: bool,
+    ) -> Result<Progress, Error> {
+        let (literal_length_decoder, distance_decoder) = if fixed {
+            let (literal_length, distance) = &*FIXED_DECODERS;
+            (literal_length, distance)
+        } else {
+            (&self.literal_length_decoder, &self.distance_decoder)
+        };
+
+        let bounds = Bounds {
+            stream_start: 0,
+            limit,
+        };
+
+        Self::inflate_block::<true>(
+            reader,
+            literal_length_decoder,
+            distance_decoder,
+            out,
+            bounds,
+            input_finished,
+        )
     }
 
     fn decode_code_length(
@@ -275,67 +326,96 @@ impl Inflater {
 
         Ok(index + repeat)
     }
-
-    fn inflate_block(
+    
+    fn inflate_block<const STREAMING: bool>(
         reader: &mut BitReader,
         literal_length_decoder: &HuffmanDecoder,
         distance_decoder: &HuffmanDecoder,
         inflated_data: &mut Vec<u8>,
         bounds: Bounds,
-    ) -> Result<(), Error> {
-        let result = Self::decode_symbols(
+        input_finished: bool,
+    ) -> Result<Progress, Error> {
+        let result = Self::decode_symbols::<STREAMING>(
             reader,
             literal_length_decoder,
             distance_decoder,
             inflated_data,
             bounds,
+            input_finished,
         );
         reader.finish_buffered();
         result
     }
 
-    fn decode_symbols(
+    fn decode_symbols<const STREAMING: bool>(
         reader: &mut BitReader,
         literal_length_decoder: &HuffmanDecoder,
         distance_decoder: &HuffmanDecoder,
         inflated_data: &mut Vec<u8>,
         bounds: Bounds,
-    ) -> Result<(), Error> {
+        input_finished: bool,
+    ) -> Result<Progress, Error> {
         let mut pos = inflated_data.len();
-        let result = Self::decode_symbols_into(
+        let result = Self::decode_symbols_into::<STREAMING>(
             reader,
             literal_length_decoder,
             distance_decoder,
             inflated_data,
             &mut pos,
             bounds,
+            input_finished,
         );
         inflated_data.truncate(pos);
         result
     }
-
+    
     #[inline(always)]
-    fn decode_symbols_into(
+    fn decode_symbols_into<const STREAMING: bool>(
         reader: &mut BitReader,
         literal_length_decoder: &HuffmanDecoder,
         distance_decoder: &HuffmanDecoder,
         out: &mut Vec<u8>,
         pos: &mut usize,
         bounds: Bounds,
-    ) -> Result<(), Error> {
+        input_finished: bool,
+    ) -> Result<Progress, Error> {
         reader.refill_full();
         let mut entry = literal_length_decoder.lookup(reader.peek_buffer());
 
         loop {
-            // The limit is only checked here and at the end of the block, off the fast
-            // path: `grow_output` never grows `out` past `limit + OUTPUT_SLACK`, so once
-            // `pos` passes the limit, the room left drops below `OUTPUT_SLACK` and this
-            // branch is taken before any further growth.
             if out.len() - *pos < OUTPUT_SLACK {
                 if *pos > bounds.limit {
-                    return Err(Error::OutputLimitExceeded);
+                    return if STREAMING {
+                        Ok(Progress::OutputFull)
+                    } else {
+                        Err(Error::OutputLimitExceeded)
+                    };
                 }
                 Self::grow_output(out, *pos, bounds.limit);
+            }
+            
+            if STREAMING && !input_finished && reader.buffered_bits() < MAX_SYMBOL_BITS {
+                let checkpoint = (reader.clone(), *pos);
+
+                match Self::decode_one_symbol(
+                    reader,
+                    literal_length_decoder,
+                    distance_decoder,
+                    out,
+                    pos,
+                    bounds,
+                ) {
+                    Ok(true) => return Ok(Progress::EndOfBlock),
+                    Ok(false) => {
+                        reader.refill_full();
+                        entry = literal_length_decoder.lookup(reader.peek_buffer());
+                        continue;
+                    }
+                    Err(_) => {
+                        (*reader, *pos) = checkpoint;
+                        return Ok(Progress::NeedInput);
+                    }
+                }
             }
 
             if entry.kind() == Entry::LITERAL {
@@ -387,13 +467,49 @@ impl Inflater {
                     *pos += length as usize;
                 }
                 Entry::END_OF_BLOCK => {
-                    if *pos > bounds.limit {
+                    if !STREAMING && *pos > bounds.limit {
                         return Err(Error::OutputLimitExceeded);
                     }
-                    return Ok(());
+                    return Ok(Progress::EndOfBlock);
                 }
                 _ => return Err(entry.error()),
             }
+        }
+    }
+    
+    fn decode_one_symbol(
+        reader: &mut BitReader,
+        literal_length_decoder: &HuffmanDecoder,
+        distance_decoder: &HuffmanDecoder,
+        out: &mut [u8],
+        pos: &mut usize,
+        bounds: Bounds,
+    ) -> Result<bool, Error> {
+        let entry = literal_length_decoder.lookup(reader.peek_buffer());
+        reader.consume_buffered(entry.code_length())?;
+
+        match entry.kind() {
+            Entry::LITERAL => {
+                Self::write_literals(out, pos, entry);
+                Ok(false)
+            }
+            Entry::BASE => {
+                let length = entry.value() + reader.take_buffered(entry.extra_bits())?;
+
+                let distance_entry = distance_decoder.lookup(reader.peek_buffer());
+                reader.consume_buffered(distance_entry.code_length())?;
+                if distance_entry.kind() != Entry::BASE {
+                    return Err(distance_entry.error());
+                }
+                let distance =
+                    distance_entry.value() + reader.take_buffered(distance_entry.extra_bits())?;
+
+                Self::copy_match(out, *pos, length as usize, distance as usize, bounds)?;
+                *pos += length as usize;
+                Ok(false)
+            }
+            Entry::END_OF_BLOCK => Ok(true),
+            _ => Err(entry.error()),
         }
     }
 
