@@ -1,6 +1,8 @@
 use crate::Error;
 use crate::checksum::adler32;
+use crate::compression::deflater::{self, Deflater};
 use crate::compression::inflater::{Inflater, OutputSize};
+use crate::io::bit_writer::BitWriter;
 
 fn is_fcheck_valid(data: &[u8]) -> bool {
     (((data[0] as u16) << 8) | data[1] as u16) % 31 == 0
@@ -76,4 +78,21 @@ pub(crate) fn inflate_into(
     }
 
     Ok(inflated.output_added)
+}
+
+pub(crate) fn deflate(deflater: &mut Deflater, data: &[u8]) -> Vec<u8> {
+    let mut writer = BitWriter::with_capacity(2 + deflater::output_bound(data.len()) + 4);
+
+    write_header(&mut writer);
+    deflater.deflate_into(data, &mut writer);
+
+    writer.align_to_byte();
+    writer.write_bytes(&adler32::compute_adler32(data).to_be_bytes());
+
+    writer.finish()
+}
+
+fn write_header(writer: &mut BitWriter) {
+    writer.write_bits(0x78, 8); // CMF = 8, CINFO = 7
+    writer.write_bits(1, 8); // 01 for now
 }

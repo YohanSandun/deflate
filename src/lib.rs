@@ -41,7 +41,9 @@ pub use error::Error;
 pub use options::OutputOptions;
 pub use stream_decompressor::StreamDecompressor;
 
+use compression::deflater::{self, Deflater};
 use compression::inflater::Inflater;
+use io::bit_writer::BitWriter;
 
 /// Decompresses a raw DEFLATE stream.
 ///
@@ -137,6 +139,29 @@ pub fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, Error> {
 /// decompresses to more than `options` allows.
 pub fn decompress_zlib_with(data: &[u8], options: OutputOptions) -> Result<Vec<u8>, Error> {
     Decompressor::new().decompress_zlib_with(data, options)
+}
+
+/// Compresses `data` into a raw DEFLATE stream (RFC 1951), the reverse of
+/// [`decompress`].
+/// ```
+/// let data = b"hello hello hello hello";
+/// assert_eq!(rust_deflate::decompress(&rust_deflate::compress(data)).unwrap(), data);
+/// ```
+pub fn compress(data: &[u8]) -> Vec<u8> {
+    let mut writer = BitWriter::with_capacity(deflater::output_bound(data.len()));
+    Deflater::new().deflate_into(data, &mut writer);
+    writer.finish()
+}
+
+/// Compresses `data` into a zlib stream (RFC 1950), the reverse of
+/// [`decompress_zlib`]: a 2-byte header, raw DEFLATE, then an Adler-32 checksum.
+///
+/// ```
+/// let data = b"hello hello hello hello";
+/// assert_eq!(rust_deflate::decompress_zlib(&rust_deflate::compress_zlib(data)).unwrap(), data);
+/// ```
+pub fn compress_zlib(data: &[u8]) -> Vec<u8> {
+    zlib::deflate(&mut Deflater::new(), data)
 }
 
 /// A reusable DEFLATE decompressor for decompressing many streams.
