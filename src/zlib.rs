@@ -3,6 +3,7 @@ use crate::checksum::adler32;
 use crate::compression::deflater::{self, Deflater};
 use crate::compression::inflater::{Inflater, OutputSize};
 use crate::io::bit_writer::BitWriter;
+use crate::options::{CompressionOptions, Strategy};
 
 fn is_fcheck_valid(data: &[u8]) -> bool {
     (((data[0] as u16) << 8) | data[1] as u16) % 31 == 0
@@ -80,11 +81,15 @@ pub(crate) fn inflate_into(
     Ok(inflated.output_added)
 }
 
-pub(crate) fn deflate(deflater: &mut Deflater, data: &[u8]) -> Vec<u8> {
+pub(crate) fn deflate(
+    deflater: &mut Deflater,
+    data: &[u8],
+    options: CompressionOptions,
+) -> Vec<u8> {
     let mut writer = BitWriter::with_capacity(2 + deflater::output_bound(data.len()) + 4);
 
-    write_header(&mut writer);
-    deflater.deflate_into(data, &mut writer);
+    write_header(&mut writer, options);
+    deflater.deflate_into(data, options, &mut writer);
 
     writer.align_to_byte();
     writer.write_bytes(&adler32::compute_adler32(data).to_be_bytes());
@@ -92,7 +97,22 @@ pub(crate) fn deflate(deflater: &mut Deflater, data: &[u8]) -> Vec<u8> {
     writer.finish()
 }
 
-fn write_header(writer: &mut BitWriter) {
-    writer.write_bits(0x78, 8); // CMF = 8, CINFO = 7
-    writer.write_bits(1, 8); // 01 for now
+fn write_header(writer: &mut BitWriter, options: CompressionOptions) {
+    const CMF: u32 = 0x78; // CM = 8, CINFO = 7
+    
+    let flevel = match (options.get_strategy(), options.get_level()) {
+        (Strategy::Stored, _) | (_, 0..=1) => 0,
+        (_, 2..=5) => 1,
+        (_, 6) => 2,
+        _ => 3,
+    };
+
+    let flg = flevel << 6;
+    let fcheck = (31 - (CMF << 8 | flg) % 31) % 31;
+
+    writer.write_bits(CMF, 8);
+    writer.write_bits(flg | fcheck, 8);
 }
+
+#[cfg(test)]
+mod tests;

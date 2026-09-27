@@ -1,9 +1,17 @@
 use super::{Deflater, MAX_STORED_BLOCK};
 use crate::io::bit_writer::BitWriter;
+use crate::options::{CompressionOptions, Strategy};
+
+const STORED: CompressionOptions = CompressionOptions::new().strategy(Strategy::Stored);
+const FIXED: CompressionOptions = CompressionOptions::new().strategy(Strategy::Fixed);
 
 fn deflate(data: &[u8]) -> Vec<u8> {
+    deflate_with(data, STORED)
+}
+
+fn deflate_with(data: &[u8], options: CompressionOptions) -> Vec<u8> {
     let mut writer = BitWriter::new();
-    Deflater::new().deflate_into(data, &mut writer);
+    Deflater::new().deflate_into(data, options, &mut writer);
     writer.finish()
 }
 
@@ -156,7 +164,7 @@ fn deflater_can_be_reused() {
 
     for data in [&b"first"[..], &[], &b"second stream"[..]] {
         let mut writer = BitWriter::new();
-        deflater.deflate_into(data, &mut writer);
+        deflater.deflate_into(data, STORED, &mut writer);
         assert_eq!(writer.finish(), deflate(data));
     }
 }
@@ -175,5 +183,58 @@ fn output_decodes_with_the_inflater() {
         let data: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
         let decoded = crate::decompress(&deflate(&data)).unwrap();
         assert!(decoded == data, "length {len}");
+    }
+}
+
+// --- fixed Huffman blocks -------------------------------------------------------
+
+#[test]
+fn fixed_empty_input_is_just_the_header_and_end_of_block() {
+    // BFINAL = 1, BTYPE = 01, then end-of-block (seven 0 bits): what zlib writes.
+    assert_eq!(deflate_with(&[], FIXED.level(0)), vec![0x03, 0x00]);
+}
+
+#[test]
+fn fixed_literals_only() {
+    // Level 0 finds no matches. "a" is literal 97: fixed code 0x30 + 97 = 0x91 as 8
+    // bits, sent most significant bit first.
+    let options = FIXED.level(0);
+    assert_eq!(deflate_with(b"a", options), vec![0x4B, 0x04, 0x00]);
+}
+
+#[test]
+fn fixed_output_decodes_with_the_inflater() {
+    let text = b"hello hello hello hello, the quick brown fox jumps over the lazy dog";
+    let inputs: Vec<Vec<u8>> = vec![
+        Vec::new(),
+        b"a".to_vec(),
+        text.to_vec(),
+        vec![0; 100_000],
+        (0..=255u8).cycle().take(70_000).collect(),
+        (0..200_000u32).map(|i| (i * 31 % 251) as u8).collect(),
+    ];
+
+    for level in 0..=9 {
+        for data in &inputs {
+            let decoded = crate::decompress(&deflate_with(data, FIXED.level(level))).unwrap();
+            assert!(decoded == *data, "level {level}, length {}", data.len());
+        }
+    }
+}
+
+#[test]
+fn fixed_shrinks_repetitive_input() {
+    let data = vec![b'x'; 10_000];
+    assert!(deflate_with(&data, FIXED).len() < 100);
+}
+
+#[test]
+fn fixed_deflater_can_be_reused() {
+    let mut deflater = Deflater::new();
+
+    for data in [&b"first first first"[..], &[], &b"second stream"[..]] {
+        let mut writer = BitWriter::new();
+        deflater.deflate_into(data, FIXED, &mut writer);
+        assert_eq!(writer.finish(), deflate_with(data, FIXED));
     }
 }

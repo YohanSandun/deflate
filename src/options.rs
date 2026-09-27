@@ -73,3 +73,76 @@ impl OutputOptions {
         }
     }
 }
+
+/// Which kind of DEFLATE blocks the compressor writes (RFC 1951 section 3.2.3).
+///
+/// ```
+/// use rust_deflate::{CompressionOptions, Strategy};
+///
+/// let options = CompressionOptions::new().strategy(Strategy::Fixed).level(9);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Strategy {
+    #[default]
+    Stored,
+    Fixed,
+    Dynamic,
+}
+
+/// Settings for [`compress_with`] and [`compress_zlib_with`].
+///
+/// The default is [`Strategy::Stored`] at level 6.
+///
+/// [`compress_with`]: crate::compress_with
+/// [`compress_zlib_with`]: crate::compress_zlib_with
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompressionOptions {
+    strategy: Strategy,
+    level: u8,
+}
+
+impl CompressionOptions {
+    /// The highest level: [`CompressionOptions::level`] clamps to it.
+    pub const MAX_LEVEL: u8 = 9;
+
+    /// [`Strategy::Stored`] at level 6.
+    pub const fn new() -> Self {
+        Self {
+            strategy: Strategy::Stored,
+            level: 6,
+        }
+    }
+
+    /// Which kind of blocks to write.
+    pub const fn strategy(mut self, strategy: Strategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// How hard to look for repeated data, from 0 to 9: higher levels search more
+    /// and compress better, but take longer. 0 finds no matches at all, so only the
+    /// Huffman coding shrinks the data. Values above 9 are treated as 9.
+    pub const fn level(mut self, level: u8) -> Self {
+        self.level = if level > Self::MAX_LEVEL {
+            Self::MAX_LEVEL
+        } else {
+            level
+        };
+        self
+    }
+
+    pub(crate) const fn get_strategy(self) -> Strategy {
+        self.strategy
+    }
+
+    pub(crate) const fn get_level(self) -> u8 {
+        self.level
+    }
+}
+
+impl Default for CompressionOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}

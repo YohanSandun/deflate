@@ -38,7 +38,7 @@ mod zlib;
 
 pub use decoder::{DeflateDecoder, ZlibDecoder};
 pub use error::Error;
-pub use options::OutputOptions;
+pub use options::{CompressionOptions, OutputOptions, Strategy};
 pub use stream_decompressor::StreamDecompressor;
 
 use compression::deflater::{self, Deflater};
@@ -148,8 +148,22 @@ pub fn decompress_zlib_with(data: &[u8], options: OutputOptions) -> Result<Vec<u
 /// assert_eq!(rust_deflate::decompress(&rust_deflate::compress(data)).unwrap(), data);
 /// ```
 pub fn compress(data: &[u8]) -> Vec<u8> {
+    compress_with(data, CompressionOptions::new())
+}
+
+/// Like [`compress`], with [`CompressionOptions`] to choose the block type and how
+/// hard to look for repeated data.
+///
+/// ```
+/// use rust_deflate::{compress_with, decompress, CompressionOptions, Strategy};
+///
+/// let data = b"hello hello hello hello";
+/// let options = CompressionOptions::new().strategy(Strategy::Stored);
+/// assert_eq!(decompress(&compress_with(data, options)).unwrap(), data);
+/// ```
+pub fn compress_with(data: &[u8], options: CompressionOptions) -> Vec<u8> {
     let mut writer = BitWriter::with_capacity(deflater::output_bound(data.len()));
-    Deflater::new().deflate_into(data, &mut writer);
+    Deflater::new().deflate_into(data, options, &mut writer);
     writer.finish()
 }
 
@@ -161,7 +175,22 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
 /// assert_eq!(rust_deflate::decompress_zlib(&rust_deflate::compress_zlib(data)).unwrap(), data);
 /// ```
 pub fn compress_zlib(data: &[u8]) -> Vec<u8> {
-    zlib::deflate(&mut Deflater::new(), data)
+    compress_zlib_with(data, CompressionOptions::new())
+}
+
+/// Like [`compress_zlib`], with [`CompressionOptions`] to choose the block type and
+/// how hard to look for repeated data. The level is also recorded in the header's
+/// FLEVEL field.
+///
+/// ```
+/// use rust_deflate::{compress_zlib_with, decompress_zlib, CompressionOptions, Strategy};
+///
+/// let data = b"hello hello hello hello";
+/// let options = CompressionOptions::new().strategy(Strategy::Stored);
+/// assert_eq!(decompress_zlib(&compress_zlib_with(data, options)).unwrap(), data);
+/// ```
+pub fn compress_zlib_with(data: &[u8], options: CompressionOptions) -> Vec<u8> {
+    zlib::deflate(&mut Deflater::new(), data, options)
 }
 
 /// A reusable DEFLATE decompressor for decompressing many streams.
