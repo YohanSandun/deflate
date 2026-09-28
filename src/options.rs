@@ -84,9 +84,14 @@ impl OutputOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Strategy {
+    /// Uncompressed blocks only.
     #[default]
     Stored,
+    /// One block with the fixed Huffman codes.
     Fixed,
+    /// Splits the input into blocks and writes each as whichever type is smallest,
+    /// usually one with Huffman codes built for its data. Levels 8 and 9 search
+    /// for the best split.
     Dynamic,
 }
 

@@ -81,6 +81,89 @@ impl FixedCodes {
         canonical_codes(&[5; DISTANCE_SYMBOLS], &mut codes.distance);
         codes
     }
+
+    pub(crate) fn block_bits(&self, frequencies: &Frequencies) -> u64 {
+        let literal_length = |symbol: usize| self.literal_length[symbol].len;
+        3 + data_bits(literal_length, |symbol| self.distance[symbol].len, frequencies)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Frequencies {
+    pub(crate) literal_length: [u32; MAX_LITERAL_LENGTH_CODES],
+    pub(crate) distance: [u32; DISTANCE_SYMBOLS],
+}
+
+impl Frequencies {
+    pub(crate) fn new() -> Self {
+        Self {
+            literal_length: [0; MAX_LITERAL_LENGTH_CODES],
+            distance: [0; DISTANCE_SYMBOLS],
+        }
+    }
+
+    pub(crate) fn of(tokens: &[Token]) -> Self {
+        let mut frequencies = Self::new();
+        frequencies.add_tokens(tokens);
+        frequencies
+    }
+
+    #[inline]
+    pub(crate) fn add(&mut self, token: Token) {
+        match token {
+            Token::Literal(byte) => self.literal_length[byte as usize] += 1,
+            Token::Match { length, distance } => {
+                self.literal_length[length_symbol(length).symbol as usize] += 1;
+                self.distance[distance_symbol(distance).symbol as usize] += 1;
+            }
+        }
+    }
+
+    pub(crate) fn add_tokens(&mut self, tokens: &[Token]) {
+        for &token in tokens {
+            self.add(token);
+        }
+    }
+
+    pub(crate) fn add_all(&mut self, other: &Self) {
+        for (count, &more) in self.literal_length.iter_mut().zip(&other.literal_length) {
+            *count += more;
+        }
+        for (count, &more) in self.distance.iter_mut().zip(&other.distance) {
+            *count += more;
+        }
+    }
+
+    pub(crate) fn difference(later: &Self, earlier: &Self) -> Self {
+        let mut out = later.clone();
+        for (count, &less) in out.literal_length.iter_mut().zip(&earlier.literal_length) {
+            *count -= less;
+        }
+        for (count, &less) in out.distance.iter_mut().zip(&earlier.distance) {
+            *count -= less;
+        }
+        out
+    }
+}
+
+fn data_bits(
+    literal_length: impl Fn(usize) -> u8,
+    distance: impl Fn(usize) -> u8,
+    frequencies: &Frequencies,
+) -> u64 {
+    let mut bits = literal_length(END_OF_BLOCK) as u64;
+    for (symbol, &count) in frequencies.literal_length.iter().enumerate() {
+        let extra = if symbol > END_OF_BLOCK {
+            LENGTH_EXTRA_BITS[symbol - END_OF_BLOCK - 1]
+        } else {
+            0
+        };
+        bits += count as u64 * (literal_length(symbol) + extra) as u64;
+    }
+    for (symbol, &count) in frequencies.distance.iter().enumerate() {
+        bits += count as u64 * (distance(symbol) + DISTANCE_EXTRA_BITS[symbol]) as u64;
+    }
+    bits
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,68 +242,76 @@ pub(crate) fn distance_symbol(distance: u16) -> Symbol {
 pub(crate) fn build_lengths(frequencies: &[u32], max_bits: usize, lengths: &mut [u8]) {
     debug_assert_eq!(frequencies.len(), lengths.len(), "one length per symbol");
     debug_assert!(frequencies.len() >= 2, "need room for two codes");
+    debug_assert!(frequencies.len() <= MAX_LITERAL_LENGTH_CODES, "too many symbols");
     debug_assert!(frequencies.len() <= 1 << max_bits, "too many symbols for {max_bits} bits");
 
     lengths.fill(0);
 
-    // Used symbols, least frequent first (ties by symbol, so the result is stable).
-    let mut symbols: Vec<usize> = (0..frequencies.len())
-        .filter(|&symbol| frequencies[symbol] > 0)
-        .collect();
-    symbols.sort_unstable_by_key(|&symbol| (frequencies[symbol], symbol));
+    let mut keys = [0u64; MAX_LITERAL_LENGTH_CODES];
+    let mut used = 0;
+    for (symbol, &frequency) in frequencies.iter().enumerate() {
+        if frequency > 0 {
+            keys[used] = (frequency as u64) << 16 | symbol as u64;
+            used += 1;
+        }
+    }
+    let keys = &mut keys[..used];
+    keys.sort_unstable();
 
-    if symbols.len() < 2 {
-        let used = symbols.first().copied();
+    if keys.len() < 2 {
+        let used = keys.first().map(|&key| (key & 0xFFFF) as usize);
         let other = if used == Some(0) { 1 } else { 0 };
         lengths[used.unwrap_or(1)] = 1;
         lengths[other] = 1;
         return;
     }
 
-    let counts = length_counts(frequencies, &symbols, max_bits);
+    let counts = length_counts(keys, max_bits);
 
     // The longest codes go to the least frequent symbols.
-    let mut next = symbols.iter();
+    let mut next = keys.iter();
     for len in (1..=max_bits).rev() {
-        for &symbol in next.by_ref().take(counts[len] as usize) {
-            lengths[symbol] = len as u8;
+        for &key in next.by_ref().take(counts[len] as usize) {
+            lengths[(key & 0xFFFF) as usize] = len as u8;
         }
     }
 }
 
-fn length_counts(frequencies: &[u32], symbols: &[usize], max_bits: usize) -> [u32; MAX_BITS + 1] {
-    let n = symbols.len();
-    let mut weight: Vec<u64> = symbols.iter().map(|&s| frequencies[s] as u64).collect();
-    let mut parent = vec![0usize; 2 * n - 1];
-    weight.reserve(n - 1);
+fn length_counts(keys: &[u64], max_bits: usize) -> [u32; MAX_BITS + 1] {
+    const MAX_NODES: usize = 2 * MAX_LITERAL_LENGTH_CODES - 1;
+
+    let n = keys.len();
+    let mut weight = [0u64; MAX_NODES];
+    let mut parent = [0u16; MAX_NODES];
+    for (weight, &key) in weight.iter_mut().zip(keys) {
+        *weight = key >> 16;
+    }
 
     let (mut leaf, mut merged) = (0, n);
     for node in n..2 * n - 1 {
         let mut lightest = || {
             // On a tie, the leaf: it keeps the tree shallower.
-            let pick = if leaf < n && (merged >= node || weight[leaf] <= weight[merged]) {
+            if leaf < n && (merged >= node || weight[leaf] <= weight[merged]) {
                 leaf += 1;
                 leaf - 1
             } else {
                 merged += 1;
                 merged - 1
-            };
-            (pick, weight[pick])
+            }
         };
-        let (a, weight_a) = lightest();
-        let (b, weight_b) = lightest();
-        parent[a] = node;
-        parent[b] = node;
-        weight.push(weight_a + weight_b);
+        let (a, b) = (lightest(), lightest());
+        parent[a] = node as u16;
+        parent[b] = node as u16;
+        weight[node] = weight[a] + weight[b];
     }
 
     // Parents come after their children, so one backward pass gives every depth.
-    let mut depth = vec![0usize; 2 * n - 1];
+    let mut depth = [0u16; MAX_NODES];
     let mut counts = [0u32; MAX_BITS + 1];
     for node in (0..2 * n - 2).rev() {
-        depth[node] = depth[parent[node]] + 1;
+        depth[node] = depth[parent[node] as usize] + 1;
         if node < n {
-            counts[depth[node].min(max_bits)] += 1;
+            counts[(depth[node] as usize).min(max_bits)] += 1;
         }
     }
 
@@ -237,7 +328,12 @@ fn length_counts(frequencies: &[u32], symbols: &[usize], max_bits: usize) -> [u3
     counts
 }
 
+#[cfg(test)]
 pub(crate) fn encode_code_lengths(lengths: &[u8], out: &mut Vec<Symbol>) {
+    for_each_code_length_symbol(lengths, |symbol| out.push(symbol));
+}
+
+fn for_each_code_length_symbol(lengths: &[u8], mut emit: impl FnMut(Symbol)) {
     let plain = |len: u8| Symbol {
         symbol: len as u16,
         extra_bits: 0,
@@ -259,23 +355,25 @@ pub(crate) fn encode_code_lengths(lengths: &[u8], out: &mut Vec<Symbol>) {
         if len == 0 {
             while left >= 11 {
                 let count = left.min(138);
-                out.push(repeat(18, 7, count - 11));
+                emit(repeat(18, 7, count - 11));
                 left -= count;
             }
             if left >= 3 {
-                out.push(repeat(17, 3, left - 3));
+                emit(repeat(17, 3, left - 3));
                 left = 0;
             }
         } else {
-            out.push(plain(len));
+            emit(plain(len));
             left -= 1;
             while left >= 3 {
                 let count = left.min(6);
-                out.push(repeat(16, 2, count - 3));
+                emit(repeat(16, 2, count - 3));
                 left -= count;
             }
         }
-        out.extend(std::iter::repeat_n(plain(len), left));
+        for _ in 0..left {
+            emit(plain(len));
+        }
     }
 }
 
@@ -291,7 +389,6 @@ pub(crate) struct DynamicCodes {
     pub(crate) code_length_symbols: Vec<Symbol>,
 
     literal_length_frequencies: [u32; MAX_LITERAL_LENGTH_CODES],
-    distance_frequencies: [u32; DISTANCE_SYMBOLS],
     code_length_frequencies: [u32; CODE_LENGTH_SYMBOLS],
     lengths: [u8; MAX_LITERAL_LENGTH_CODES + DISTANCE_SYMBOLS],
 }
@@ -307,63 +404,109 @@ impl DynamicCodes {
             code_length_count: 0,
             code_length_symbols: Vec::new(),
             literal_length_frequencies: [0; MAX_LITERAL_LENGTH_CODES],
-            distance_frequencies: [0; DISTANCE_SYMBOLS],
             code_length_frequencies: [0; CODE_LENGTH_SYMBOLS],
             lengths: [0; MAX_LITERAL_LENGTH_CODES + DISTANCE_SYMBOLS],
         }
     }
 
     /// Rebuilds every field for a block holding `tokens`.
+    #[cfg(test)]
     pub(crate) fn build(&mut self, tokens: &[Token]) {
-        self.literal_length_frequencies.fill(0);
-        self.distance_frequencies.fill(0);
-        for token in tokens {
-            match *token {
-                Token::Literal(byte) => self.literal_length_frequencies[byte as usize] += 1,
-                Token::Match { length, distance } => {
-                    self.literal_length_frequencies[length_symbol(length).symbol as usize] += 1;
-                    self.distance_frequencies[distance_symbol(distance).symbol as usize] += 1;
-                }
-            }
-        }
-        self.literal_length_frequencies[END_OF_BLOCK] += 1;
+        self.build_from(&Frequencies::of(tokens));
+    }
 
+    /// Rebuilds every field for a block with these symbol counts.
+    pub(crate) fn build_from(&mut self, frequencies: &Frequencies) {
+        let (literal_length_count, distance_count) = self.build_symbol_lengths(frequencies);
         let (literal_length_lengths, distance_lengths) =
-            self.lengths.split_at_mut(MAX_LITERAL_LENGTH_CODES);
-        build_lengths(&self.literal_length_frequencies, MAX_BITS, literal_length_lengths);
-        build_lengths(&self.distance_frequencies, MAX_BITS, distance_lengths);
+            self.lengths.split_at(MAX_LITERAL_LENGTH_CODES);
         canonical_codes(
             literal_length_lengths,
             &mut self.literal_length[..MAX_LITERAL_LENGTH_CODES],
         );
         self.literal_length[MAX_LITERAL_LENGTH_CODES..].fill(Code::default());
         canonical_codes(distance_lengths, &mut self.distance);
+        self.literal_length_count = literal_length_count;
+        self.distance_count = distance_count;
 
-        self.literal_length_count = used_count(literal_length_lengths).max(257);
-        self.distance_count = used_count(distance_lengths).max(1);
-
-        let sent = self.literal_length_count + self.distance_count;
-        self.lengths.copy_within(
-            MAX_LITERAL_LENGTH_CODES..MAX_LITERAL_LENGTH_CODES + self.distance_count,
-            self.literal_length_count,
-        );
+        let sent = self.join_sent_lengths(literal_length_count, distance_count);
         self.code_length_symbols.clear();
-        encode_code_lengths(&self.lengths[..sent], &mut self.code_length_symbols);
-
         self.code_length_frequencies.fill(0);
-        for s in &self.code_length_symbols {
-            self.code_length_frequencies[s.symbol as usize] += 1;
-        }
-        let mut code_length_lengths = [0u8; CODE_LENGTH_SYMBOLS];
-        build_lengths(
-            &self.code_length_frequencies,
-            MAX_CODE_LENGTH_BITS,
-            &mut code_length_lengths,
-        );
-        canonical_codes(&code_length_lengths, &mut self.code_length);
+        let (symbols, counts) = (&mut self.code_length_symbols, &mut self.code_length_frequencies);
+        for_each_code_length_symbol(&self.lengths[..sent], |s| {
+            counts[s.symbol as usize] += 1;
+            symbols.push(s);
+        });
 
-        let ordered = CODE_LENGTH_ORDER.map(|symbol| code_length_lengths[symbol]);
-        self.code_length_count = used_count(&ordered).max(4);
+        let (code_length_lengths, code_length_count) = self.code_length_lengths();
+        canonical_codes(&code_length_lengths, &mut self.code_length);
+        self.code_length_count = code_length_count;
+    }
+
+    pub(crate) fn estimate_bits(&mut self, frequencies: &Frequencies) -> u64 {
+        let (literal_length_count, distance_count) = self.build_symbol_lengths(frequencies);
+        let (literal_length_lengths, distance_lengths) =
+            self.lengths.split_at(MAX_LITERAL_LENGTH_CODES);
+        let data = data_bits(
+            |symbol| literal_length_lengths[symbol],
+            |symbol| distance_lengths[symbol],
+            frequencies,
+        );
+
+        let sent = self.join_sent_lengths(literal_length_count, distance_count);
+        self.code_length_frequencies.fill(0);
+        let counts = &mut self.code_length_frequencies;
+        let mut extra = 0u64;
+        for_each_code_length_symbol(&self.lengths[..sent], |s| {
+            counts[s.symbol as usize] += 1;
+            extra += s.extra_bits as u64;
+        });
+
+        let (code_length_lengths, code_length_count) = self.code_length_lengths();
+        let mut header = 3 + 14 + 3 * code_length_count as u64 + extra;
+        for (&count, &len) in self.code_length_frequencies.iter().zip(&code_length_lengths) {
+            header += count as u64 * len as u64;
+        }
+        header + data
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_bits(&self, frequencies: &Frequencies) -> u64 {
+        let mut header = 3 + 14 + 3 * self.code_length_count as u64;
+        for s in &self.code_length_symbols {
+            header += (self.code_length[s.symbol as usize].len + s.extra_bits) as u64;
+        }
+        let literal_length = |symbol: usize| self.literal_length[symbol].len;
+        header + data_bits(literal_length, |symbol| self.distance[symbol].len, frequencies)
+    }
+
+    fn build_symbol_lengths(&mut self, frequencies: &Frequencies) -> (usize, usize) {
+        self.literal_length_frequencies = frequencies.literal_length;
+        self.literal_length_frequencies[END_OF_BLOCK] += 1;
+
+        let (literal_length_lengths, distance_lengths) =
+            self.lengths.split_at_mut(MAX_LITERAL_LENGTH_CODES);
+        build_lengths(&self.literal_length_frequencies, MAX_BITS, literal_length_lengths);
+        build_lengths(&frequencies.distance, MAX_BITS, distance_lengths);
+        (
+            used_count(literal_length_lengths).max(257),
+            used_count(distance_lengths).max(1),
+        )
+    }
+
+    fn join_sent_lengths(&mut self, literal_length_count: usize, distance_count: usize) -> usize {
+        self.lengths.copy_within(
+            MAX_LITERAL_LENGTH_CODES..MAX_LITERAL_LENGTH_CODES + distance_count,
+            literal_length_count,
+        );
+        literal_length_count + distance_count
+    }
+
+    fn code_length_lengths(&self) -> ([u8; CODE_LENGTH_SYMBOLS], usize) {
+        let mut lengths = [0u8; CODE_LENGTH_SYMBOLS];
+        build_lengths(&self.code_length_frequencies, MAX_CODE_LENGTH_BITS, &mut lengths);
+        let ordered = CODE_LENGTH_ORDER.map(|symbol| lengths[symbol]);
+        (lengths, used_count(&ordered).max(4))
     }
 }
 

@@ -1,4 +1,7 @@
 use super::{Deflater, MAX_STORED_BLOCK};
+use crate::compression::block_splitter::{BlockCosts, BlockType, stored_bits};
+use crate::compression::huffman_encoder::{DynamicCodes, Frequencies};
+use crate::compression::lz77::{MatchFinder, Token};
 use crate::io::bit_writer::BitWriter;
 use crate::options::{CompressionOptions, Strategy};
 
@@ -244,10 +247,14 @@ fn fixed_deflater_can_be_reused() {
 
 #[test]
 fn dynamic_block_header() {
-    // Level 0: only "a" and end-of-block are used, so 257 literal/length codes
-    // (HLIT = 0). With no matches, distance codes 0 and 1 still get one bit each
-    // (HDIST = 1).
-    let out = deflate_with(b"a", DYNAMIC.level(0));
+    // Only "a" and end-of-block are used, so 257 literal/length codes (HLIT = 0).
+    // With no matches, distance codes 0 and 1 still get one bit each (HDIST = 1).
+    let tokens = [Token::Literal(b'a')];
+    let mut codes = DynamicCodes::new();
+    codes.build(&tokens);
+    let mut writer = BitWriter::new();
+    Deflater::write_dynamic_block(&mut writer, &codes, &tokens, true);
+    let out = writer.finish();
 
     assert_eq!(out[0] & 0b111, 0b101, "BFINAL = 1, BTYPE = 10");
     assert_eq!(out[0] >> 3, 0, "HLIT");
@@ -310,5 +317,163 @@ fn dynamic_deflater_can_be_reused() {
         let mut writer = BitWriter::new();
         deflater.deflate_into(data, DYNAMIC, &mut writer);
         assert_eq!(writer.finish(), deflate_with(data, DYNAMIC));
+    }
+}
+
+// --- mixed block types ----------------------------------------------------------
+
+// Deterministic pseudo-random bytes: incompressible.
+fn noise(len: usize, seed: u32) -> Vec<u8> {
+    let mut state = seed;
+    (0..len)
+        .map(|_| {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (state >> 16) as u8
+        })
+        .collect()
+}
+
+// Text, then noise, then zeros, then text again.
+fn mixed_input() -> Vec<u8> {
+    let text: Vec<u8> = b"the quick brown fox jumps over the lazy dog, again and again. "
+        .iter()
+        .cycle()
+        .take(30_000)
+        .copied()
+        .collect();
+    let mut data = text.clone();
+    data.extend(noise(30_000, 9));
+    data.extend(vec![0; 20_000]);
+    data.extend(skewed(30_000));
+    data
+}
+
+fn tokens_for(data: &[u8], level: u8) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    MatchFinder::new().find_tokens(data, level, &mut tokens);
+    tokens
+}
+
+// The bits `write` adds after `offset` bits are already written.
+fn bits_written(offset: u32, write: impl FnOnce(&mut BitWriter)) -> u64 {
+    let mut writer = BitWriter::with_capacity(0);
+    writer.write_bits(0, offset);
+    let before = writer.bit_len();
+    write(&mut writer);
+    (writer.bit_len() - before) as u64
+}
+
+#[test]
+fn stored_estimate_is_exact() {
+    for len in [0, 1, 100, MAX_STORED_BLOCK, MAX_STORED_BLOCK + 1, 3 * MAX_STORED_BLOCK + 7] {
+        let data = vec![5; len];
+        for offset in 0..8 {
+            let written = bits_written(offset, |w| Deflater::write_stored_blocks(w, &data, true));
+            assert_eq!(written, stored_bits(len, offset as usize), "{len} bytes at bit {offset}");
+        }
+    }
+}
+
+#[test]
+fn fixed_and_dynamic_estimates_are_exact() {
+    let mut costs = BlockCosts::new();
+    for data in [&b""[..], b"a", b"hello hello hello", &mixed_input(), &skewed(5000)] {
+        for level in [0, 1, 6, 9] {
+            let tokens = tokens_for(data, level);
+            let frequencies = Frequencies::of(&tokens);
+
+            let fixed = bits_written(0, |w| Deflater::write_fixed_block(w, &costs.fixed, &tokens, true));
+            assert_eq!(fixed, costs.fixed.block_bits(&frequencies), "fixed, level {level}");
+
+            let estimate = costs.dynamic.estimate_bits(&frequencies);
+            costs.dynamic.build_from(&frequencies);
+            let dynamic =
+                bits_written(0, |w| Deflater::write_dynamic_block(w, &costs.dynamic, &tokens, true));
+            assert_eq!(dynamic, estimate, "dynamic, level {level}");
+        }
+    }
+}
+
+#[test]
+fn cheapest_block_writes_the_size_it_promised() {
+    let mut costs = BlockCosts::new();
+    for data in [noise(3000, 1), b"a".to_vec(), skewed(3000)] {
+        let tokens = tokens_for(&data, 6);
+        let frequencies = Frequencies::of(&tokens);
+        for offset in 0..8 {
+            let (_, promised) = costs.cheapest(&frequencies, data.len(), offset as usize);
+            let written = bits_written(offset, |w| {
+                Deflater::write_cheapest_block(w, &mut costs, &tokens, &data, true)
+            });
+            assert_eq!(written, promised, "at bit {offset}");
+        }
+    }
+}
+
+#[test]
+fn each_block_type_is_chosen_when_smallest() {
+    let mut costs = BlockCosts::new();
+    let mut pick = |data: &[u8]| {
+        let tokens = tokens_for(data, 6);
+        costs.cheapest(&Frequencies::of(&tokens), data.len(), 0).0
+    };
+
+    assert_eq!(pick(&noise(5000, 2)), BlockType::Stored);
+    assert_eq!(pick(b"a"), BlockType::Fixed);
+    assert_eq!(pick(&skewed(5000)), BlockType::Dynamic);
+}
+
+#[test]
+fn incompressible_input_barely_grows() {
+    for level in 0..=9 {
+        let data = noise(100_000, 3);
+        let out = deflate_with(&data, DYNAMIC.level(level));
+        assert!(out.len() <= data.len() + 5 * 2 + 1, "level {level}: {}", out.len());
+    }
+}
+
+#[test]
+fn mixed_input_is_split_into_blocks() {
+    let data = mixed_input();
+    for level in [1, 6, 8, 9] {
+        let mut deflater = Deflater::new();
+        let mut writer = BitWriter::new();
+        deflater.deflate_into(&data, DYNAMIC.level(level), &mut writer);
+
+        assert!(deflater.block_ends.len() > 1, "level {level}");
+        assert!(crate::decompress(&writer.finish()).unwrap() == data, "level {level}");
+    }
+}
+
+#[test]
+fn splitting_beats_one_block() {
+    // Each part wants different codes, so separate blocks are smaller.
+    let data = mixed_input();
+    for level in [8, 9] {
+        let tokens = tokens_for(&data, level);
+        let mut costs = BlockCosts::new();
+        let (_, one_block) = costs.cheapest(&Frequencies::of(&tokens), data.len(), 0);
+        let split = deflate_with(&data, DYNAMIC.level(level)).len() as u64 * 8;
+        assert!(split < one_block * 95 / 100, "level {level}: {split} vs {one_block}");
+    }
+}
+
+#[test]
+fn higher_levels_split_at_least_as_well() {
+    let data = mixed_input();
+    let size = |level| deflate_with(&data, DYNAMIC.level(level)).len();
+    assert!(size(9) <= size(8), "{} vs {}", size(9), size(8));
+    assert!(size(8) <= size(7), "{} vs {}", size(8), size(7));
+}
+
+#[test]
+fn long_input_spanning_several_search_segments_decodes() {
+    // Noise gives one token per byte: more than one segment of the level 8 and 9
+    // search.
+    let mut data = noise(200_000, 4);
+    data.extend(skewed(150_000));
+    for level in [8, 9] {
+        let out = deflate_with(&data, DYNAMIC.level(level));
+        assert!(crate::decompress(&out).unwrap() == data, "level {level}");
     }
 }

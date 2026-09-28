@@ -1,3 +1,4 @@
+pub(crate) mod block_splitter;
 pub(crate) mod deflater;
 pub(crate) mod huffman_decoder;
 pub(crate) mod huffman_encoder;

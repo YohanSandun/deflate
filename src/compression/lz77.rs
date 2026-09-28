@@ -12,6 +12,17 @@ pub(crate) enum Token {
     Match { length: u16, distance: u16 },
 }
 
+impl Token {
+    /// How many bytes of input the token stands for.
+    #[inline]
+    pub(crate) fn byte_len(self) -> usize {
+        match self {
+            Token::Literal(_) => 1,
+            Token::Match { length, .. } => length as usize,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Config {
     max_chain: u16,

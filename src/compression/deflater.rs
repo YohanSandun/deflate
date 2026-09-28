@@ -1,4 +1,7 @@
-use crate::compression::huffman_encoder::{self, Code, DynamicCodes, END_OF_BLOCK, FixedCodes};
+use crate::compression::block_splitter::{self, BlockCosts, BlockType};
+use crate::compression::huffman_encoder::{
+    self, Code, DynamicCodes, END_OF_BLOCK, FixedCodes, Frequencies,
+};
 use crate::compression::lz77::{MatchFinder, Token};
 use crate::compression::tables::CODE_LENGTH_ORDER;
 use crate::io::bit_writer::BitWriter;
@@ -14,8 +17,8 @@ pub(crate) fn output_bound(data_len: usize) -> usize {
 pub(crate) struct Deflater {
     match_finder: MatchFinder,
     tokens: Vec<Token>,
-    fixed_codes: Option<Box<FixedCodes>>,
-    dynamic_codes: Option<Box<DynamicCodes>>,
+    block_ends: Vec<usize>,
+    costs: Option<Box<BlockCosts>>,
 }
 
 impl Deflater {
@@ -23,8 +26,8 @@ impl Deflater {
         Self {
             match_finder: MatchFinder::new(),
             tokens: Vec::new(),
-            fixed_codes: None,
-            dynamic_codes: None,
+            block_ends: Vec::new(),
+            costs: None,
         }
     }
 
@@ -34,37 +37,71 @@ impl Deflater {
         options: CompressionOptions,
         writer: &mut BitWriter,
     ) {
+        if options.get_strategy() == Strategy::Stored {
+            Self::write_stored_blocks(writer, data, true);
+            return;
+        }
+
+        self.match_finder
+            .find_tokens(data, options.get_level(), &mut self.tokens);
+        let costs = self
+            .costs
+            .get_or_insert_with(|| Box::new(BlockCosts::new()));
+
         match options.get_strategy() {
-            Strategy::Stored => Self::write_stored_blocks(writer, data),
-            Strategy::Fixed => {
-                self.match_finder
-                    .find_tokens(data, options.get_level(), &mut self.tokens);
-                let codes = self
-                    .fixed_codes
-                    .get_or_insert_with(|| Box::new(FixedCodes::new()));
-                Self::write_fixed_block(writer, codes, &self.tokens, true);
-            }
-            Strategy::Dynamic => {
-                self.match_finder
-                    .find_tokens(data, options.get_level(), &mut self.tokens);
-                let codes = self
-                    .dynamic_codes
-                    .get_or_insert_with(|| Box::new(DynamicCodes::new()));
-                codes.build(&self.tokens);
-                Self::write_dynamic_block(writer, codes, &self.tokens, true);
+            Strategy::Fixed => Self::write_fixed_block(writer, &costs.fixed, &self.tokens, true),
+            _ => {
+                block_splitter::split(
+                    &self.tokens,
+                    options.get_level(),
+                    costs,
+                    &mut self.block_ends,
+                );
+
+                let (mut start, mut byte_start) = (0, 0);
+                for (i, &end) in self.block_ends.iter().enumerate() {
+                    let tokens = &self.tokens[start..end];
+                    let byte_end = byte_start + block_splitter::byte_len(tokens);
+                    let last = i == self.block_ends.len() - 1;
+                    Self::write_cheapest_block(
+                        writer,
+                        costs,
+                        tokens,
+                        &data[byte_start..byte_end],
+                        last,
+                    );
+                    (start, byte_start) = (end, byte_end);
+                }
             }
         }
     }
 
-    fn write_stored_blocks(writer: &mut BitWriter, data: &[u8]) {
+    /// Writes `tokens`, which stand for `data`, as whichever block type is smallest.
+    fn write_cheapest_block(
+        writer: &mut BitWriter,
+        costs: &mut BlockCosts,
+        tokens: &[Token],
+        data: &[u8],
+        last: bool,
+    ) {
+        let frequencies = Frequencies::of(tokens);
+        match costs.cheapest(&frequencies, data.len(), writer.bit_len() % 8).0 {
+            BlockType::Stored => Self::write_stored_blocks(writer, data, last),
+            BlockType::Fixed => Self::write_fixed_block(writer, &costs.fixed, tokens, last),
+            BlockType::Dynamic => Self::write_dynamic_block(writer, &costs.dynamic, tokens, last),
+        }
+    }
+    
+    fn write_stored_blocks(writer: &mut BitWriter, data: &[u8], last: bool) {
         if data.is_empty() {
-            Self::write_stored_block(writer, data, true);
+            Self::write_stored_block(writer, data, last);
             return;
         }
 
         let blocks = data.chunks(MAX_STORED_BLOCK);
+        let final_block = (data.len() - 1) / MAX_STORED_BLOCK;
         for (i, block) in blocks.enumerate() {
-            Self::write_stored_block(writer, block, i == (data.len() - 1) / MAX_STORED_BLOCK);
+            Self::write_stored_block(writer, block, last && i == final_block);
         }
     }
 

@@ -523,3 +523,76 @@ fn rebuilding_forgets_the_previous_block() {
         assert_eq!(codes.code_length_symbols, fresh.code_length_symbols);
     }
 }
+
+// --- Frequencies and block sizes ---------------------------------------------------
+
+#[test]
+fn frequencies_count_literal_length_and_distance_symbols() {
+    let mut tokens = literals(b"aab");
+    tokens.push(Token::Match { length: 3, distance: 3 });
+    let frequencies = Frequencies::of(&tokens);
+
+    assert_eq!(frequencies.literal_length[b'a' as usize], 2);
+    assert_eq!(frequencies.literal_length[b'b' as usize], 1);
+    assert_eq!(frequencies.literal_length[257], 1, "length 3");
+    assert_eq!(frequencies.distance[2], 1, "distance 3");
+    assert_eq!(frequencies.literal_length[END_OF_BLOCK], 0, "not counted");
+}
+
+#[test]
+fn frequencies_add_and_subtract() {
+    let first = literals(b"hello");
+    let second = literals(b"world");
+    let mut both = first.clone();
+    both.extend(&second);
+
+    let mut sum = Frequencies::of(&first);
+    sum.add_all(&Frequencies::of(&second));
+    assert_eq!(sum, Frequencies::of(&both));
+    assert_eq!(
+        Frequencies::difference(&sum, &Frequencies::of(&first)),
+        Frequencies::of(&second)
+    );
+}
+
+#[test]
+fn fixed_block_bits() {
+    // Header, "a" (8 bits), end-of-block (7 bits).
+    let codes = FixedCodes::new();
+    assert_eq!(codes.block_bits(&Frequencies::of(&literals(b"a"))), 3 + 8 + 7);
+
+    // A match of length 11 (symbol 265, 7 bits + 1 extra) at distance 5 (5 bits +
+    // 1 extra).
+    let frequencies = Frequencies::of(&[Token::Match { length: 11, distance: 5 }]);
+    assert_eq!(codes.block_bits(&frequencies), 3 + 8 + 6 + 7);
+}
+
+#[test]
+fn estimate_matches_the_built_block() {
+    let mut codes = DynamicCodes::new();
+    let mut random = literals(&pseudo_random(3000, 256).iter().map(|&f| f as u8).collect::<Vec<_>>());
+    random.push(Token::Match { length: 100, distance: 2000 });
+
+    for tokens in sample_tokens().into_iter().chain([random]) {
+        let frequencies = Frequencies::of(&tokens);
+        let estimate = codes.estimate_bits(&frequencies);
+        codes.build_from(&frequencies);
+        assert_eq!(estimate, codes.block_bits(&frequencies), "{tokens:?}");
+    }
+}
+
+#[test]
+fn estimate_leaves_the_built_codes_alone() {
+    let tokens = literals(b"built codes");
+    let mut codes = built(&tokens);
+    codes.estimate_bits(&Frequencies::of(&literals(b"something else entirely")));
+
+    let fresh = built(&tokens);
+    assert_eq!(codes.literal_length, fresh.literal_length);
+    assert_eq!(codes.distance, fresh.distance);
+    assert_eq!(codes.code_length, fresh.code_length);
+    assert_eq!(codes.literal_length_count, fresh.literal_length_count);
+    assert_eq!(codes.distance_count, fresh.distance_count);
+    assert_eq!(codes.code_length_count, fresh.code_length_count);
+    assert_eq!(codes.code_length_symbols, fresh.code_length_symbols);
+}
