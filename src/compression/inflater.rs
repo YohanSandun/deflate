@@ -2,6 +2,7 @@ use std::sync::LazyLock;
 
 use crate::Error;
 use crate::compression::huffman_decoder::{Alphabet, Entry, HuffmanDecoder};
+use crate::compression::tables::{CODE_LENGTH_ORDER, MAX_LITERAL_LENGTH_CODES};
 use crate::io::bit_reader::BitReader;
 
 // Built once per process and shared by every fixed block.
@@ -29,11 +30,6 @@ const MAX_INITIAL_CAPACITY: usize = 64 << 20;
 
 const OUTPUT_SLACK: usize = 258 + 8;
 
-const CODE_LENGTH_ORDER: [usize; 19] = [
-    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
-];
-
-const MAX_LITERAL_LENGTH_CODES: usize = 286;
 const MAX_DISTANCE_CODES: usize = 30;
 
 const MAX_SYMBOL_BITS: u32 = 48;

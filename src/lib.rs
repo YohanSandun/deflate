@@ -1,9 +1,18 @@
-//! A DEFLATE ([RFC 1951]) decompressor written from scratch in Rust, with no
-//! dependencies and no `unsafe` code.
+//! A DEFLATE ([RFC 1951]) and zlib ([RFC 1950]) compressor and decompressor written
+//! from scratch in Rust, with no dependencies and no `unsafe` code.
 //!
-//! [`decompress`] takes a raw DEFLATE stream, and [`decompress_zlib`] a zlib
-//! ([RFC 1950]) stream: DEFLATE with a 2-byte header and an Adler-32 checksum.
-//! Stored, fixed Huffman and dynamic Huffman blocks are supported.
+//! ```
+//! let data = b"hello hello hello hello";
+//!
+//! let compressed = rust_deflate::compress(data);
+//! assert_eq!(rust_deflate::decompress(&compressed).unwrap(), data);
+//! ```
+//!
+//! # Decompressing
+//!
+//! [`decompress`] takes a raw DEFLATE stream, and [`decompress_zlib`] a zlib stream:
+//! DEFLATE with a 2-byte header and an Adler-32 checksum. Stored, fixed Huffman and
+//! dynamic Huffman blocks are supported, and malformed input returns an [`Error`].
 //!
 //! ```
 //! // "hello hello hello hello", compressed by zlib as raw DEFLATE.
@@ -15,33 +24,62 @@
 //! ```
 //!
 //! To decompress many streams, reuse a [`Decompressor`] instead: it keeps its
-//! decoding tables between calls.
+//! decoding tables between calls. To cap the output size of untrusted input, pass
+//! [`OutputOptions`] to the `_with` functions.
 //!
 //! To decompress data too large to hold in memory, such as a multi-gigabyte file,
 //! wrap any [`std::io::Read`] source in a [`ZlibDecoder`] or [`DeflateDecoder`].
 //! They decompress in constant memory. When data arrives in pieces instead (network
 //! callbacks, a WebAssembly wrapper), push it into a [`StreamDecompressor`].
 //!
+//! # Compressing
+//!
+//! [`compress`] and [`compress_zlib`] go the other way, at
+//! [`CompressionLevel::MEDIUM`]. [`compress_with`] and [`compress_zlib_with`] take a
+//! [`CompressionLevel`], from [`CompressionLevel::NONE`] to
+//! [`CompressionLevel::BEST`], or [`CompressionOptions`] to also choose the block
+//! [`Strategy`].
+//!
+//! ```
+//! use rust_deflate::{compress_with, decompress, CompressionLevel};
+//!
+//! let data = b"hello hello hello hello";
+//! let compressed = compress_with(data, CompressionLevel::BEST);
+//! assert_eq!(decompress(&compressed).unwrap(), data);
+//! ```
+//!
+//! To compress many inputs, reuse a [`Compressor`], which can also append to a
+//! buffer you pass in. To compress data of any size in constant memory, write it
+//! through a [`ZlibEncoder`] or [`DeflateEncoder`], or push it into a
+//! [`StreamCompressor`].
+//!
 //! [RFC 1950]: https://www.rfc-editor.org/rfc/rfc1950
 //! [RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951
 #![forbid(unsafe_code)]
 
 mod checksum;
+mod compress_stream;
 mod compression;
 mod decoder;
+mod encoder;
 mod error;
 mod io;
 mod options;
 mod stream;
+mod stream_compressor;
 mod stream_decompressor;
 mod zlib;
 
 pub use decoder::{DeflateDecoder, ZlibDecoder};
+pub use encoder::{DeflateEncoder, ZlibEncoder};
 pub use error::Error;
-pub use options::OutputOptions;
+pub use options::{CompressionLevel, CompressionOptions, OutputOptions, Strategy};
+pub use stream_compressor::StreamCompressor;
 pub use stream_decompressor::StreamDecompressor;
 
+use compression::deflater::{self, Deflater};
 use compression::inflater::Inflater;
+use io::bit_writer::BitWriter;
 
 /// Decompresses a raw DEFLATE stream.
 ///
@@ -137,6 +175,200 @@ pub fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, Error> {
 /// decompresses to more than `options` allows.
 pub fn decompress_zlib_with(data: &[u8], options: OutputOptions) -> Result<Vec<u8>, Error> {
     Decompressor::new().decompress_zlib_with(data, options)
+}
+
+/// Compresses `data` into a raw DEFLATE stream (RFC 1951) at
+/// [`CompressionLevel::MEDIUM`], the reverse of [`decompress`].
+///
+/// To choose the level, use [`compress_with`]. To compress many inputs, a reused
+/// [`Compressor`] keeps its match-finding tables between calls.
+///
+/// ```
+/// let data = b"hello hello hello hello";
+/// assert_eq!(rust_deflate::decompress(&rust_deflate::compress(data)).unwrap(), data);
+/// ```
+pub fn compress(data: &[u8]) -> Vec<u8> {
+    compress_with(data, CompressionOptions::new())
+}
+
+/// Like [`compress`], at the given [`CompressionLevel`], or with
+/// [`CompressionOptions`] to also choose the block type.
+///
+/// ```
+/// use rust_deflate::{compress_with, decompress, CompressionLevel};
+///
+/// let data = b"hello hello hello hello";
+/// for level in [CompressionLevel::NONE, CompressionLevel::FAST, CompressionLevel::BEST] {
+///     assert_eq!(decompress(&compress_with(data, level)).unwrap(), data);
+/// }
+/// ```
+pub fn compress_with(data: &[u8], options: impl Into<CompressionOptions>) -> Vec<u8> {
+    Compressor::new().compress_with(data, options)
+}
+
+/// Compresses `data` into a zlib stream (RFC 1950) at
+/// [`CompressionLevel::MEDIUM`], the reverse of [`decompress_zlib`]: a 2-byte
+/// header, raw DEFLATE, then an Adler-32 checksum.
+///
+/// ```
+/// let data = b"hello hello hello hello";
+/// assert_eq!(rust_deflate::decompress_zlib(&rust_deflate::compress_zlib(data)).unwrap(), data);
+/// ```
+pub fn compress_zlib(data: &[u8]) -> Vec<u8> {
+    compress_zlib_with(data, CompressionOptions::new())
+}
+
+/// Like [`compress_zlib`], at the given [`CompressionLevel`], or with
+/// [`CompressionOptions`] to also choose the block type. The level is also recorded
+/// in the header's FLEVEL field.
+///
+/// ```
+/// use rust_deflate::{compress_zlib_with, decompress_zlib, CompressionLevel};
+///
+/// let data = b"hello hello hello hello";
+/// let compressed = compress_zlib_with(data, CompressionLevel::BEST);
+/// assert_eq!(decompress_zlib(&compressed).unwrap(), data);
+/// ```
+pub fn compress_zlib_with(data: &[u8], options: impl Into<CompressionOptions>) -> Vec<u8> {
+    Compressor::new().compress_zlib_with(data, options)
+}
+
+/// A reusable DEFLATE compressor for compressing many inputs.
+///
+/// It keeps its match-finding tables (about 256 KB) and working buffers between
+/// calls, so each input after the first skips allocating them. Inputs don't
+/// affect each other: the same data always compresses to the same bytes.
+///
+/// ```
+/// use rust_deflate::{CompressionLevel, Compressor, decompress};
+///
+/// let mut compressor = Compressor::new();
+/// let mut out = Vec::new();
+///
+/// for data in [&b"first first first"[..], b"second second second"] {
+///     out.clear();
+///     let written = compressor.compress_into_with(data, &mut out, CompressionLevel::BEST);
+///     assert_eq!(written, out.len());
+///     assert_eq!(decompress(&out).unwrap(), data);
+/// }
+/// ```
+pub struct Compressor {
+    // Shared by the raw DEFLATE and zlib methods.
+    deflater: Deflater,
+}
+
+impl Compressor {
+    /// Creates a compressor. Its tables are allocated on first use.
+    pub fn new() -> Self {
+        Self {
+            deflater: Deflater::new(),
+        }
+    }
+
+    /// Compresses `data` into a raw DEFLATE stream, like [`compress`].
+    pub fn compress(&mut self, data: &[u8]) -> Vec<u8> {
+        self.compress_with(data, CompressionOptions::new())
+    }
+
+    /// Like [`Compressor::compress`], at the given [`CompressionLevel`] or with
+    /// [`CompressionOptions`], like [`compress_with`].
+    pub fn compress_with(&mut self, data: &[u8], options: impl Into<CompressionOptions>) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.compress_into_with(data, &mut out, options);
+        out
+    }
+
+    /// Compresses `data` into a raw DEFLATE stream and appends it to `out`,
+    /// returning the number of bytes appended. What `out` already holds is left
+    /// alone.
+    ///
+    /// Reusing `out` between calls (with [`Vec::clear`] in between) also saves
+    /// allocating an output buffer each time.
+    ///
+    /// ```
+    /// use rust_deflate::{Compressor, decompress};
+    ///
+    /// let mut compressor = Compressor::new();
+    /// let mut out = b"header".to_vec();
+    ///
+    /// let written = compressor.compress_into(b"hello hello hello hello", &mut out);
+    /// assert_eq!(&out[..6], b"header");
+    /// assert_eq!(decompress(&out[6..]).unwrap(), b"hello hello hello hello");
+    /// assert_eq!(written, out.len() - 6);
+    /// ```
+    pub fn compress_into(&mut self, data: &[u8], out: &mut Vec<u8>) -> usize {
+        self.compress_into_with(data, out, CompressionOptions::new())
+    }
+
+    /// Like [`Compressor::compress_into`], at the given [`CompressionLevel`] or
+    /// with [`CompressionOptions`].
+    pub fn compress_into_with(
+        &mut self,
+        data: &[u8],
+        out: &mut Vec<u8>,
+        options: impl Into<CompressionOptions>,
+    ) -> usize {
+        let options = options.into();
+        let start = out.len();
+        let mut writer =
+            BitWriter::appending_to(std::mem::take(out), deflater::output_bound(data.len()));
+        self.deflater.deflate_into(data, options, &mut writer);
+        *out = writer.finish();
+        out.len() - start
+    }
+
+    /// Compresses `data` into a zlib stream, like [`compress_zlib`].
+    pub fn compress_zlib(&mut self, data: &[u8]) -> Vec<u8> {
+        self.compress_zlib_with(data, CompressionOptions::new())
+    }
+
+    /// Like [`Compressor::compress_zlib`], at the given [`CompressionLevel`] or
+    /// with [`CompressionOptions`], like [`compress_zlib_with`].
+    pub fn compress_zlib_with(
+        &mut self,
+        data: &[u8],
+        options: impl Into<CompressionOptions>,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.compress_zlib_into_with(data, &mut out, options);
+        out
+    }
+
+    /// Compresses `data` into a zlib stream and appends it to `out`, returning the
+    /// number of bytes appended. Works like [`Compressor::compress_into`]; the
+    /// checksum covers only `data`.
+    pub fn compress_zlib_into(&mut self, data: &[u8], out: &mut Vec<u8>) -> usize {
+        self.compress_zlib_into_with(data, out, CompressionOptions::new())
+    }
+
+    /// Like [`Compressor::compress_zlib_into`], at the given [`CompressionLevel`]
+    /// or with [`CompressionOptions`].
+    pub fn compress_zlib_into_with(
+        &mut self,
+        data: &[u8],
+        out: &mut Vec<u8>,
+        options: impl Into<CompressionOptions>,
+    ) -> usize {
+        let options = options.into();
+        let start = out.len();
+        let mut writer =
+            BitWriter::appending_to(std::mem::take(out), zlib::output_bound(data.len()));
+        zlib::deflate_into(&mut self.deflater, data, options, &mut writer);
+        *out = writer.finish();
+        out.len() - start
+    }
+}
+
+impl Default for Compressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for Compressor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Compressor").finish_non_exhaustive()
+    }
 }
 
 /// A reusable DEFLATE decompressor for decompressing many streams.

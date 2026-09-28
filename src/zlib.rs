@@ -1,6 +1,9 @@
 use crate::Error;
 use crate::checksum::adler32;
+use crate::compression::deflater::{self, Deflater};
 use crate::compression::inflater::{Inflater, OutputSize};
+use crate::io::bit_writer::BitWriter;
+use crate::options::{CompressionOptions, Strategy};
 
 fn is_fcheck_valid(data: &[u8]) -> bool {
     (((data[0] as u16) << 8) | data[1] as u16) % 31 == 0
@@ -77,3 +80,42 @@ pub(crate) fn inflate_into(
 
     Ok(inflated.output_added)
 }
+
+/// How much to reserve for a zlib stream of `data_len` bytes: enough for it as
+/// stored blocks.
+pub(crate) fn output_bound(data_len: usize) -> usize {
+    2 + deflater::output_bound(data_len) + 4
+}
+
+pub(crate) fn deflate_into(
+    deflater: &mut Deflater,
+    data: &[u8],
+    options: CompressionOptions,
+    writer: &mut BitWriter,
+) {
+    write_header(writer, options);
+    deflater.deflate_into(data, options, writer);
+
+    writer.align_to_byte();
+    writer.write_bytes(&adler32::compute_adler32(data).to_be_bytes());
+}
+
+pub(crate) fn write_header(writer: &mut BitWriter, options: CompressionOptions) {
+    const CMF: u32 = 0x78; // CM = 8, CINFO = 7
+    
+    let flevel = match (options.get_strategy(), options.get_level()) {
+        (Strategy::Stored, _) | (_, 0..=1) => 0,
+        (_, 2..=5) => 1,
+        (_, 6) => 2,
+        _ => 3,
+    };
+
+    let flg = flevel << 6;
+    let fcheck = (31 - (CMF << 8 | flg) % 31) % 31;
+
+    writer.write_bits(CMF, 8);
+    writer.write_bits(flg | fcheck, 8);
+}
+
+#[cfg(test)]
+mod tests;
