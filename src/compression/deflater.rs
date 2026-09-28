@@ -1,5 +1,6 @@
-use crate::compression::huffman_encoder::{self, Code, END_OF_BLOCK, FixedCodes};
+use crate::compression::huffman_encoder::{self, Code, DynamicCodes, END_OF_BLOCK, FixedCodes};
 use crate::compression::lz77::{MatchFinder, Token};
+use crate::compression::tables::CODE_LENGTH_ORDER;
 use crate::io::bit_writer::BitWriter;
 use crate::options::{CompressionOptions, Strategy};
 
@@ -14,6 +15,7 @@ pub(crate) struct Deflater {
     match_finder: MatchFinder,
     tokens: Vec<Token>,
     fixed_codes: Option<Box<FixedCodes>>,
+    dynamic_codes: Option<Box<DynamicCodes>>,
 }
 
 impl Deflater {
@@ -22,6 +24,7 @@ impl Deflater {
             match_finder: MatchFinder::new(),
             tokens: Vec::new(),
             fixed_codes: None,
+            dynamic_codes: None,
         }
     }
 
@@ -41,7 +44,15 @@ impl Deflater {
                     .get_or_insert_with(|| Box::new(FixedCodes::new()));
                 Self::write_fixed_block(writer, codes, &self.tokens, true);
             }
-            Strategy::Dynamic => todo!("dynamic Huffman blocks"),
+            Strategy::Dynamic => {
+                self.match_finder
+                    .find_tokens(data, options.get_level(), &mut self.tokens);
+                let codes = self
+                    .dynamic_codes
+                    .get_or_insert_with(|| Box::new(DynamicCodes::new()));
+                codes.build(&self.tokens);
+                Self::write_dynamic_block(writer, codes, &self.tokens, true);
+            }
         }
     }
 
@@ -62,14 +73,34 @@ impl Deflater {
         Self::write_tokens(writer, &codes.literal_length, &codes.distance, tokens);
     }
 
-    /// Writes `tokens` with the given codes, then the end-of-block symbol. Shared by
-    /// fixed and dynamic blocks, which differ only in their codes.
-    ///
-    /// - a literal: its literal/length code
-    /// - a match: the code for `huffman_encoder::length_symbol(length)` and its extra
-    ///   bits, then the distance code for `huffman_encoder::distance_symbol(distance)`
-    ///   and its extra bits
-    /// - finally `literal_length[END_OF_BLOCK]`
+    fn write_dynamic_block(
+        writer: &mut BitWriter,
+        codes: &DynamicCodes,
+        tokens: &[Token],
+        last: bool,
+    ) {
+        writer.write_bits(last as u32 | 0b10 << 1, 3); // BFINAL, then BTYPE = 10
+        Self::write_dynamic_header(writer, codes);
+        Self::write_tokens(writer, &codes.literal_length, &codes.distance, tokens);
+    }
+
+    fn write_dynamic_header(writer: &mut BitWriter, codes: &DynamicCodes) {
+        let hlit = (codes.literal_length_count - 257) as u32;
+        let hdist = (codes.distance_count - 1) as u32;
+        let hclen = (codes.code_length_count - 4) as u32;
+        writer.write_bits(hlit | hdist << 5 | hclen << 10, 14);
+
+        for &symbol in &CODE_LENGTH_ORDER[..codes.code_length_count] {
+            writer.write_bits(codes.code_length[symbol].len as u32, 3);
+        }
+
+        for s in &codes.code_length_symbols {
+            let code = codes.code_length[s.symbol as usize];
+            writer.write_bits(code.bits as u32, code.len as u32);
+            writer.write_bits(s.extra as u32, s.extra_bits as u32);
+        }
+    }
+    
     fn write_tokens(
         writer: &mut BitWriter,
         literal_length: &[Code],

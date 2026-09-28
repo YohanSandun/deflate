@@ -4,6 +4,7 @@ use crate::options::{CompressionOptions, Strategy};
 
 const STORED: CompressionOptions = CompressionOptions::new().strategy(Strategy::Stored);
 const FIXED: CompressionOptions = CompressionOptions::new().strategy(Strategy::Fixed);
+const DYNAMIC: CompressionOptions = CompressionOptions::new().strategy(Strategy::Dynamic);
 
 fn deflate(data: &[u8]) -> Vec<u8> {
     deflate_with(data, STORED)
@@ -236,5 +237,78 @@ fn fixed_deflater_can_be_reused() {
         let mut writer = BitWriter::new();
         deflater.deflate_into(data, FIXED, &mut writer);
         assert_eq!(writer.finish(), deflate_with(data, FIXED));
+    }
+}
+
+// --- dynamic Huffman blocks -----------------------------------------------------
+
+#[test]
+fn dynamic_block_header() {
+    // Level 0: only "a" and end-of-block are used, so 257 literal/length codes
+    // (HLIT = 0). With no matches, distance codes 0 and 1 still get one bit each
+    // (HDIST = 1).
+    let out = deflate_with(b"a", DYNAMIC.level(0));
+
+    assert_eq!(out[0] & 0b111, 0b101, "BFINAL = 1, BTYPE = 10");
+    assert_eq!(out[0] >> 3, 0, "HLIT");
+    assert_eq!(out[1] & 0x1F, 1, "HDIST");
+}
+
+#[test]
+fn dynamic_output_decodes_with_the_inflater() {
+    let text = b"hello hello hello hello, the quick brown fox jumps over the lazy dog";
+    let inputs: Vec<Vec<u8>> = vec![
+        Vec::new(),
+        b"a".to_vec(),
+        b"aaaa".to_vec(),
+        text.to_vec(),
+        vec![0; 100_000],
+        (0..=255u8).cycle().take(70_000).collect(),
+        (0..200_000u32).map(|i| (i * 31 % 251) as u8).collect(),
+        skewed(50_000),
+    ];
+
+    for level in 0..=9 {
+        for data in &inputs {
+            let decoded = crate::decompress(&deflate_with(data, DYNAMIC.level(level))).unwrap();
+            assert!(decoded == *data, "level {level}, length {}", data.len());
+        }
+    }
+}
+
+// Pseudo-random bytes from a 4-letter alphabet: about 2 bits of information each.
+fn skewed(len: usize) -> Vec<u8> {
+    let mut state = 1u32;
+    (0..len)
+        .map(|_| {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            b"acgt"[(state >> 16) as usize % 4]
+        })
+        .collect()
+}
+
+#[test]
+fn dynamic_beats_fixed_on_a_small_alphabet() {
+    // Fixed codes spend 8 bits on each of these literals, dynamic about 2.
+    let data = skewed(10_000);
+    let fixed = deflate_with(&data, FIXED.level(0)).len();
+    let dynamic = deflate_with(&data, DYNAMIC.level(0)).len();
+    assert!(dynamic < fixed / 2, "dynamic {dynamic} bytes, fixed {fixed}");
+}
+
+#[test]
+fn dynamic_shrinks_repetitive_input() {
+    let data = vec![b'x'; 10_000];
+    assert!(deflate_with(&data, DYNAMIC).len() < 100);
+}
+
+#[test]
+fn dynamic_deflater_can_be_reused() {
+    let mut deflater = Deflater::new();
+
+    for data in [&b"first first first"[..], &[], &b"second stream"[..]] {
+        let mut writer = BitWriter::new();
+        deflater.deflate_into(data, DYNAMIC, &mut writer);
+        assert_eq!(writer.finish(), deflate_with(data, DYNAMIC));
     }
 }

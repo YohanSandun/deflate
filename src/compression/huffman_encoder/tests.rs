@@ -1,4 +1,5 @@
 use super::*;
+use crate::compression::tables::CODE_LENGTH_ORDER;
 
 // The code as the RFC writes it (most significant bit first), for comparing.
 fn unreversed(code: Code) -> (u16, u8) {
@@ -143,5 +144,382 @@ fn every_distance_round_trips_through_the_tables() {
             "distance {distance}"
         );
         assert_eq!(DISTANCE_BASE[index] + s.extra, distance);
+    }
+}
+
+// --- build_lengths ---------------------------------------------------------------
+
+fn lengths_for(frequencies: &[u32], max_bits: usize) -> Vec<u8> {
+    let mut lengths = vec![0; frequencies.len()];
+    build_lengths(frequencies, max_bits, &mut lengths);
+    lengths
+}
+
+// Checks the lengths form a complete code within `max_bits`: the sum of 2^-length
+// over used symbols is exactly 1.
+fn assert_complete(lengths: &[u8], max_bits: usize) {
+    let mut kraft = 0u32;
+    for (symbol, &len) in lengths.iter().enumerate() {
+        assert!(len as usize <= max_bits, "symbol {symbol}: length {len}");
+        if len > 0 {
+            kraft += 1 << (MAX_BITS - len as usize);
+        }
+    }
+    assert_eq!(kraft, 1 << MAX_BITS, "not a complete code: {lengths:?}");
+}
+
+// Checks a more frequent symbol never has a longer code than a less frequent one.
+fn assert_ordered(frequencies: &[u32], lengths: &[u8]) {
+    for (a, (&freq_a, &len_a)) in frequencies.iter().zip(lengths).enumerate() {
+        for (b, (&freq_b, &len_b)) in frequencies.iter().zip(lengths).enumerate() {
+            if freq_a > freq_b && freq_b > 0 {
+                assert!(len_a <= len_b, "symbols {a} and {b}: {lengths:?}");
+            }
+        }
+    }
+}
+
+fn fibonacci(n: usize) -> Vec<u32> {
+    let mut out = vec![1, 1];
+    while out.len() < n {
+        out.push(out[out.len() - 1] + out[out.len() - 2]);
+    }
+    out.truncate(n);
+    out
+}
+
+// Deterministic pseudo-random numbers below `bound`.
+fn pseudo_random(n: usize, bound: u32) -> Vec<u32> {
+    let mut state = 0x2545_F491u32;
+    (0..n)
+        .map(|_| {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (state >> 16) % bound
+        })
+        .collect()
+}
+
+#[test]
+fn build_lengths_textbook_example() {
+    // Merges 5+9, 12+13, 14+16, 25+30, then 45+55.
+    assert_eq!(
+        lengths_for(&[5, 9, 12, 13, 16, 45], MAX_BITS),
+        [4, 4, 3, 3, 3, 1]
+    );
+}
+
+#[test]
+fn equal_frequencies_give_equal_lengths() {
+    assert_eq!(lengths_for(&[7; 4], MAX_BITS), [2; 4]);
+    assert_eq!(lengths_for(&[1; 8], MAX_BITS), [3; 8]);
+}
+
+#[test]
+fn unused_symbols_get_length_0() {
+    assert_eq!(lengths_for(&[3, 0, 1, 0, 1], MAX_BITS), [1, 0, 2, 0, 2]);
+}
+
+#[test]
+fn one_used_symbol_still_gets_a_one_bit_code() {
+    let lengths = lengths_for(&[0, 0, 5, 0], MAX_BITS);
+
+    assert_eq!(lengths[2], 1, "{lengths:?}");
+    assert_eq!(lengths.iter().filter(|&&len| len == 1).count(), 2, "{lengths:?}");
+    assert_eq!(lengths.iter().filter(|&&len| len == 0).count(), 2, "{lengths:?}");
+}
+
+#[test]
+fn no_used_symbols_gives_two_one_bit_codes() {
+    // A block with no matches still has to describe a distance code.
+    let lengths = lengths_for(&[0; DISTANCE_SYMBOLS], MAX_BITS);
+
+    assert_eq!(lengths.iter().filter(|&&len| len == 1).count(), 2, "{lengths:?}");
+    assert_eq!(lengths.iter().filter(|&&len| len == 0).count(), DISTANCE_SYMBOLS - 2);
+}
+
+#[test]
+fn lengths_are_limited_to_max_bits() {
+    // Fibonacci frequencies make the deepest possible tree: 29 levels unlimited.
+    let frequencies = fibonacci(30);
+    let lengths = lengths_for(&frequencies, MAX_BITS);
+    assert_complete(&lengths, MAX_BITS);
+    assert_ordered(&frequencies, &lengths);
+}
+
+#[test]
+fn code_length_code_lengths_are_limited_to_7_bits() {
+    let frequencies = fibonacci(CODE_LENGTH_SYMBOLS);
+    let lengths = lengths_for(&frequencies, MAX_CODE_LENGTH_BITS);
+    assert_complete(&lengths, MAX_CODE_LENGTH_BITS);
+    assert_ordered(&frequencies, &lengths);
+}
+
+#[test]
+fn lengths_for_a_full_literal_length_alphabet() {
+    // Some symbols unused, the rest spread over a wide range.
+    let frequencies: Vec<u32> = pseudo_random(MAX_LITERAL_LENGTH_CODES, 5000)
+        .into_iter()
+        .map(|f| if f < 500 { 0 } else { f })
+        .collect();
+    let lengths = lengths_for(&frequencies, MAX_BITS);
+
+    assert_complete(&lengths, MAX_BITS);
+    assert_ordered(&frequencies, &lengths);
+    for (symbol, (&freq, &len)) in frequencies.iter().zip(&lengths).enumerate() {
+        assert_eq!(freq == 0, len == 0, "symbol {symbol}");
+    }
+}
+
+// --- encode_code_lengths ---------------------------------------------------------
+
+fn run_lengths(lengths: &[u8]) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    encode_code_lengths(lengths, &mut out);
+    out
+}
+
+fn plain(lengths: &[u8]) -> Vec<Symbol> {
+    lengths.iter().map(|&len| symbol(len as u16, 0, 0)).collect()
+}
+
+// Expands code length symbols back into lengths, as a decoder does.
+fn expand(symbols: &[Symbol]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    for s in symbols {
+        let (repeat, value) = match s.symbol {
+            0..=15 => (1, s.symbol as u8),
+            16 => (3 + s.extra, *out.last().expect("16 with nothing to repeat")),
+            17 => (3 + s.extra, 0),
+            18 => (11 + s.extra, 0),
+            other => panic!("code length symbol {other}"),
+        };
+        let expected_bits = [0, 2, 3, 7][s.symbol.saturating_sub(15) as usize];
+        assert_eq!(s.extra_bits, expected_bits, "extra bits of {s:?}");
+        assert!(u32::from(s.extra) < 1 << s.extra_bits, "extra of {s:?}");
+        out.extend(std::iter::repeat_n(value, repeat as usize));
+    }
+    out
+}
+
+#[test]
+fn short_sequences_are_sent_as_themselves() {
+    let lengths = [1, 2, 3, 0, 0, 5, 5];
+    assert_eq!(run_lengths(&lengths), plain(&lengths));
+    assert_eq!(run_lengths(&[]), []);
+}
+
+#[test]
+fn runs_of_3_to_10_zeros_use_17() {
+    assert_eq!(run_lengths(&[0; 3]), [symbol(17, 3, 0)]);
+    assert_eq!(run_lengths(&[0; 10]), [symbol(17, 3, 7)]);
+}
+
+#[test]
+fn runs_of_11_to_138_zeros_use_18() {
+    assert_eq!(run_lengths(&[0; 11]), [symbol(18, 7, 0)]);
+    assert_eq!(run_lengths(&[0; 138]), [symbol(18, 7, 127)]);
+}
+
+#[test]
+fn longer_zero_runs_are_split() {
+    assert_eq!(run_lengths(&[0; 139]), [symbol(18, 7, 127), symbol(0, 0, 0)]);
+    assert_eq!(run_lengths(&[0; 141]), [symbol(18, 7, 127), symbol(17, 3, 0)]);
+    assert_eq!(run_lengths(&[0; 150]), [symbol(18, 7, 127), symbol(18, 7, 1)]);
+    assert_eq!(run_lengths(&[0; 276]), [symbol(18, 7, 127), symbol(18, 7, 127)]);
+}
+
+#[test]
+fn repeats_of_a_non_zero_length_use_16_after_the_first() {
+    assert_eq!(run_lengths(&[8; 3]), plain(&[8; 3]));
+    assert_eq!(run_lengths(&[8; 4]), [symbol(8, 0, 0), symbol(16, 2, 0)]);
+    assert_eq!(run_lengths(&[8; 7]), [symbol(8, 0, 0), symbol(16, 2, 3)]);
+}
+
+#[test]
+fn longer_non_zero_runs_are_split() {
+    // 13 repeats: 6 + 6, then 1 left over as itself.
+    assert_eq!(
+        run_lengths(&[4; 14]),
+        [symbol(4, 0, 0), symbol(16, 2, 3), symbol(16, 2, 3), symbol(4, 0, 0)]
+    );
+    // 10 repeats: 6, then 4.
+    assert_eq!(
+        run_lengths(&[4; 11]),
+        [symbol(4, 0, 0), symbol(16, 2, 3), symbol(16, 2, 1)]
+    );
+}
+
+#[test]
+fn mixed_runs() {
+    assert_eq!(
+        run_lengths(&[3, 3, 3, 3, 0, 0, 0, 7]),
+        [symbol(3, 0, 0), symbol(16, 2, 0), symbol(17, 3, 0), symbol(7, 0, 0)]
+    );
+}
+
+#[test]
+fn encode_code_lengths_appends() {
+    let mut out = vec![symbol(9, 0, 0)];
+    encode_code_lengths(&[0; 3], &mut out);
+    assert_eq!(out, [symbol(9, 0, 0), symbol(17, 3, 0)]);
+}
+
+#[test]
+fn run_length_symbols_expand_to_the_lengths() {
+    // Runs of every length from 1 to 150 of zeros and non-zeros, back to back.
+    let mut lengths = Vec::new();
+    for (i, run) in pseudo_random(200, 150).into_iter().enumerate() {
+        let value = if i % 2 == 0 { 0 } else { 1 + (i % 15) as u8 };
+        lengths.extend(std::iter::repeat_n(value, run as usize + 1));
+    }
+    assert!(expand(&run_lengths(&lengths)) == lengths);
+}
+
+// --- DynamicCodes ----------------------------------------------------------------
+
+fn built(tokens: &[Token]) -> Box<DynamicCodes> {
+    let mut codes = Box::new(DynamicCodes::new());
+    codes.build(tokens);
+    codes
+}
+
+fn literals(bytes: &[u8]) -> Vec<Token> {
+    bytes.iter().map(|&b| Token::Literal(b)).collect()
+}
+
+fn sample_tokens() -> Vec<Vec<Token>> {
+    let mut with_matches = literals(b"abcabc");
+    with_matches.push(Token::Match { length: 3, distance: 3 });
+    with_matches.push(Token::Match { length: 258, distance: 1 });
+    with_matches.push(Token::Match { length: 17, distance: 32_768 });
+    with_matches.extend(literals(b"zz"));
+
+    vec![
+        Vec::new(),
+        literals(b"a"),
+        literals(b"aab"),
+        literals(&(0..=255).collect::<Vec<u8>>()),
+        with_matches,
+    ]
+}
+
+#[test]
+fn counts_are_in_range() {
+    for tokens in sample_tokens() {
+        let codes = built(&tokens);
+        assert!((257..=286).contains(&codes.literal_length_count), "{tokens:?}");
+        assert!((1..=30).contains(&codes.distance_count), "{tokens:?}");
+        assert!((4..=19).contains(&codes.code_length_count), "{tokens:?}");
+    }
+}
+
+#[test]
+fn literals_only_block() {
+    let codes = built(&literals(b"aab"));
+
+    // End-of-block is the highest symbol used. No distances are used, but two
+    // still get a code.
+    assert_eq!(codes.literal_length_count, 257);
+    assert_eq!(codes.distance_count, 2);
+
+    assert!(codes.literal_length[b'a' as usize].len > 0);
+    assert!(codes.literal_length[b'b' as usize].len > 0);
+    assert!(codes.literal_length[END_OF_BLOCK].len > 0);
+    assert_eq!(codes.literal_length[b'c' as usize].len, 0);
+    assert!(codes.literal_length[b'a' as usize].len <= codes.literal_length[b'b' as usize].len);
+}
+
+#[test]
+fn empty_block_still_has_an_end_of_block_code() {
+    let codes = built(&[]);
+    assert_eq!(codes.literal_length_count, 257);
+    assert_eq!(codes.literal_length[END_OF_BLOCK].len, 1);
+}
+
+#[test]
+fn matches_count_their_length_and_distance_symbols() {
+    let mut tokens = literals(b"abc");
+    tokens.push(Token::Match { length: 3, distance: 3 });
+    let codes = built(&tokens);
+
+    // Length 3 is symbol 257, distance 3 is symbol 2.
+    assert_eq!(codes.literal_length_count, 258);
+    assert_eq!(codes.distance_count, 3);
+    assert!(codes.literal_length[257].len > 0);
+    assert!(codes.distance[2].len > 0);
+
+    tokens.push(Token::Match { length: 258, distance: 32_768 });
+    let codes = built(&tokens);
+    assert_eq!(codes.literal_length_count, 286);
+    assert_eq!(codes.distance_count, 30);
+}
+
+#[test]
+fn codes_are_canonical_and_complete() {
+    for tokens in sample_tokens() {
+        let codes = built(&tokens);
+        for (name, table, max_bits) in [
+            ("literal/length", &codes.literal_length[..], MAX_BITS),
+            ("distance", &codes.distance[..], MAX_BITS),
+            ("code length", &codes.code_length[..], MAX_CODE_LENGTH_BITS),
+        ] {
+            let lengths: Vec<u8> = table.iter().map(|code| code.len).collect();
+            assert_complete(&lengths, max_bits);
+
+            let mut canonical = vec![Code::default(); table.len()];
+            canonical_codes(&lengths, &mut canonical);
+            assert_eq!(table, canonical, "{name} codes for {tokens:?}");
+        }
+    }
+}
+
+#[test]
+fn code_length_symbols_expand_to_the_sent_lengths() {
+    for tokens in sample_tokens() {
+        let codes = built(&tokens);
+        let mut want: Vec<u8> = codes.literal_length[..codes.literal_length_count]
+            .iter()
+            .map(|code| code.len)
+            .collect();
+        want.extend(codes.distance[..codes.distance_count].iter().map(|code| code.len));
+
+        assert_eq!(expand(&codes.code_length_symbols), want, "{tokens:?}");
+        for s in &codes.code_length_symbols {
+            assert!(codes.code_length[s.symbol as usize].len > 0, "{s:?} has no code");
+        }
+    }
+}
+
+#[test]
+fn code_length_count_leaves_out_only_unused_codes() {
+    for tokens in sample_tokens() {
+        let codes = built(&tokens);
+        let count = codes.code_length_count;
+
+        for &symbol in &CODE_LENGTH_ORDER[count..] {
+            assert_eq!(codes.code_length[symbol].len, 0, "{tokens:?}");
+        }
+        if count > 4 {
+            assert!(codes.code_length[CODE_LENGTH_ORDER[count - 1]].len > 0, "{tokens:?}");
+        }
+    }
+}
+
+#[test]
+fn rebuilding_forgets_the_previous_block() {
+    let samples = sample_tokens();
+    let mut codes = Box::new(DynamicCodes::new());
+
+    for tokens in samples.iter().rev().chain(&samples) {
+        codes.build(tokens);
+        let fresh = built(tokens);
+
+        assert_eq!(codes.literal_length, fresh.literal_length, "{tokens:?}");
+        assert_eq!(codes.distance, fresh.distance, "{tokens:?}");
+        assert_eq!(codes.code_length, fresh.code_length, "{tokens:?}");
+        assert_eq!(codes.literal_length_count, fresh.literal_length_count);
+        assert_eq!(codes.distance_count, fresh.distance_count);
+        assert_eq!(codes.code_length_count, fresh.code_length_count);
+        assert_eq!(codes.code_length_symbols, fresh.code_length_symbols);
     }
 }
