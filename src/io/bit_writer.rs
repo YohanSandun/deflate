@@ -10,14 +10,20 @@ pub(crate) struct BitWriter {
 }
 
 impl BitWriter {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::with_capacity(0)
     }
-
-    /// A writer whose output buffer has room for `bytes` bytes up front.
+    
+    #[cfg(test)]
     pub(crate) fn with_capacity(bytes: usize) -> Self {
+        Self::appending_to(Vec::new(), bytes)
+    }
+    
+    pub(crate) fn appending_to(mut out: Vec<u8>, bytes: usize) -> Self {
+        out.reserve(bytes);
         Self {
-            out: Vec::with_capacity(bytes),
+            out,
             bit_buf: 0,
             bit_count: 0,
         }
@@ -80,6 +86,20 @@ impl BitWriter {
     /// The number of bits written so far, including alignment padding.
     pub(crate) fn bit_len(&self) -> usize {
         self.out.len() * 8 + self.bit_count as usize
+    }
+
+    /// Moves every complete byte written so far to the end of `out`. The bits of a
+    /// partial last byte stay, and later bits continue after them.
+    pub(crate) fn drain_into(&mut self, out: &mut Vec<u8>) {
+        self.flush_bytes();
+        out.append(&mut self.out);
+    }
+
+    /// Discards everything written, keeping the buffer's allocation.
+    pub(crate) fn clear(&mut self) {
+        self.out.clear();
+        self.bit_buf = 0;
+        self.bit_count = 0;
     }
 
     /// Pads the last partial byte with zero bits and returns everything written.

@@ -1,12 +1,16 @@
 # rust-deflate
 
-A DEFLATE ([RFC 1951]) and zlib ([RFC 1950]) decompressor written from scratch in Rust.
+A DEFLATE ([RFC 1951]) and zlib ([RFC 1950]) compressor and decompressor written from
+scratch in Rust.
 
 - No dependencies and no `unsafe` code (`#![forbid(unsafe_code)]`).
-- Supports all three block types: stored, fixed Huffman and dynamic Huffman.
+- Reads and writes all three block types: stored, fixed Huffman and dynamic Huffman.
 - Decodes raw DEFLATE, and zlib streams with their Adler-32 checksum verified.
-- Streams data of any size in constant memory, through `std::io::Read` or by pushing
-  chunks in as they arrive.
+- Compresses at zlib's levels 0 to 9, splitting the input into blocks and choosing
+  the smallest type for each. On typical text and binary data the output is a little
+  smaller than zlib's at the same level.
+- Streams data of any size in constant memory, both ways: through `std::io::Read` and
+  `std::io::Write`, or by pushing chunks in as they arrive.
 - Malformed input returns an error; it never panics.
 - Builds for `wasm32`, so it can sit behind a WebAssembly/JS wrapper.
 
@@ -20,12 +24,21 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-rust-deflate = "0.3"
+rust-deflate = "0.4"
 ```
 
 The crate is imported as `rust_deflate`.
 
 ## Usage
+
+```rust
+let data = b"hello hello hello hello";
+
+let compressed = rust_deflate::compress(data);
+assert_eq!(rust_deflate::decompress(&compressed).unwrap(), data);
+```
+
+## Decompressing
 
 ```rust
 // "hello hello hello hello", compressed by zlib as raw DEFLATE.
@@ -211,9 +224,105 @@ stream.finish(&mut out)?; // no more input: fails if the stream is incomplete
 `reset()` starts a new stream reusing the same buffers. Errors are
 `rust_deflate::Error`; after one, every call returns it until `reset()`.
 
-## Input formats
+## Compressing
 
-### Raw DEFLATE: `decompress`
+`compress` and `compress_zlib` compress at the default level,
+`CompressionLevel::MEDIUM` (6). The `_with` versions take a level, from
+`CompressionLevel::NONE` (0, stored as is) through `FAST` (1) to `BEST` (9), or
+`CompressionLevel::new(n)` for any level in between:
+
+```rust
+use rust_deflate::{compress, compress_zlib_with, decompress, decompress_zlib, CompressionLevel};
+
+let data = b"hello hello hello hello";
+
+let compressed = compress(data);
+assert_eq!(decompress(&compressed)?, data);
+
+let smallest = compress_zlib_with(data, CompressionLevel::BEST);
+assert_eq!(decompress_zlib(&smallest)?, data);
+# Ok::<(), rust_deflate::Error>(())
+```
+
+To compress many inputs, reuse one `Compressor`: it keeps its tables between calls.
+`compress_into` and `compress_zlib_into` append to a buffer you pass in and return
+how many bytes they added:
+
+```rust
+use rust_deflate::{CompressionLevel, Compressor};
+
+# let inputs: Vec<Vec<u8>> = vec![b"first first first".to_vec(), b"second second".to_vec()];
+let mut compressor = Compressor::new();
+let mut out = Vec::new();
+
+for data in &inputs {
+    out.clear();
+    compressor.compress_zlib_into_with(data, &mut out, CompressionLevel::FAST);
+    // use `out`
+}
+```
+
+Higher levels search harder for repeated data: `FAST` is about three times quicker than
+`MEDIUM`, and `BEST` also searches for the best places to split the input into
+blocks, which costs more time again. Compression can't fail, so these functions
+return the bytes directly.
+
+Every `_with` function and method takes either a `CompressionLevel` or a full
+`CompressionOptions`, which also chooses the block type with a `Strategy`: `Dynamic`
+(the default) splits the input into blocks and writes each as whichever type is
+smallest, while `Fixed` and `Stored` force one type. At `CompressionLevel::NONE`
+every strategy writes stored blocks, as in zlib.
+
+```rust
+use rust_deflate::{compress_with, CompressionLevel, CompressionOptions, Strategy};
+
+let options = CompressionOptions::new()
+    .strategy(Strategy::Fixed)
+    .level(CompressionLevel::new(4));
+let compressed = compress_with(b"hello hello hello hello", options);
+```
+
+### Streaming compression
+
+To compress data of any size in constant memory, write it through a `ZlibEncoder` or
+`DeflateEncoder`, which wrap any `std::io::Write`. `finish` writes the end of the
+stream and returns the writer:
+
+```rust,no_run
+use std::fs::File;
+use rust_deflate::{CompressionLevel, ZlibEncoder};
+
+let mut encoder = ZlibEncoder::with_options(File::create("archive.zz")?, CompressionLevel::BEST);
+std::io::copy(&mut File::open("archive.bin")?, &mut encoder)?;
+encoder.finish()?;
+# Ok::<(), std::io::Error>(())
+```
+
+When data is produced in pieces instead, push it into a `StreamCompressor`:
+
+```rust
+use rust_deflate::{decompress_zlib, StreamCompressor};
+
+let mut stream = StreamCompressor::zlib();
+let mut compressed = Vec::new();
+
+for chunk in [&b"hello "[..], b"hello ", b"hello"] {
+    stream.push(chunk, &mut compressed);
+}
+stream.finish(&mut compressed);
+
+assert_eq!(decompress_zlib(&compressed)?, b"hello hello hello");
+# Ok::<(), rust_deflate::Error>(())
+```
+
+Both compress 256 KB at a time (1 MB at levels 8 and 9), so output comes in bursts.
+`flush` (`Write::flush` on the encoders) writes out everything so far without ending
+the stream, like zlib's `Z_SYNC_FLUSH`, so the other side of a connection can decode
+it right away.
+
+## Formats
+
+### Raw DEFLATE: `decompress` and `compress`
 
 A bare DEFLATE stream with no header or checksum. That's what you get from, for
 example:
@@ -223,8 +332,11 @@ example:
 - Python: `zlib.compressobj(wbits=-15)`
 
 Decoding stops at the end of the final DEFLATE block; any bytes after it are ignored.
+`compress` writes the same format, which the matching decoders read:
+`zlib.inflateRawSync` in Node.js, `new DecompressionStream("deflate-raw")` in
+browsers, and `zlib.decompressobj(wbits=-15)` in Python.
 
-### zlib: `decompress_zlib`
+### zlib: `decompress_zlib` and `compress_zlib`
 
 A 2-byte header, a DEFLATE stream, then a big-endian Adler-32 checksum of the
 decompressed data. That's what you get from, for example:
@@ -241,11 +353,14 @@ checksum is verified against the decompressed data. Streams that need a preset
 dictionary are rejected with `Error::PresetDictionary`. Any bytes after the checksum
 are ignored.
 
+`compress_zlib` writes the same format, which `zlib.inflateSync` (Node.js),
+`new DecompressionStream("deflate")` (browsers) and `zlib.decompress` (Python) read.
+The header records the level in its FLEVEL field, as zlib does.
+
 ## Not supported yet
 
 - gzip ([RFC 1952])
 - zlib preset dictionaries
-- Compression
 
 ## Minimum supported Rust version
 

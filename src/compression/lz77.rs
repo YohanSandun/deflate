@@ -88,19 +88,38 @@ impl MatchFinder {
     }
 
     /// Clears `tokens` and fills it with the parse of `data`
+    #[cfg(test)]
     pub(crate) fn find_tokens(&mut self, data: &[u8], level: u8, tokens: &mut Vec<Token>) {
+        self.find_tokens_in(data, 0, data.len(), level, tokens);
+    }
+
+    pub(crate) fn find_tokens_in(
+        &mut self,
+        data: &[u8],
+        start: usize,
+        end: usize,
+        level: u8,
+        tokens: &mut Vec<Token>,
+    ) -> usize {
         tokens.clear();
 
+        if level == 0 {
+            tokens.extend(data[start..end].iter().map(|&byte| Token::Literal(byte)));
+            return end;
+        }
+
+        self.reset();
+        self.insert_history(data, start);
         match level {
-            0 => tokens.extend(data.iter().map(|&byte| Token::Literal(byte))),
-            1..=3 => {
-                self.reset();
-                self.greedy(data, GREEDY_CONFIGS[level as usize - 1], tokens);
-            }
-            _ => {
-                self.reset();
-                self.lazy(data, LAZY_CONFIGS[level.min(9) as usize - 4], tokens);
-            }
+            1..=3 => self.greedy(data, start, end, GREEDY_CONFIGS[level as usize - 1], tokens),
+            _ => self.lazy(data, start, end, LAZY_CONFIGS[level.min(9) as usize - 4], tokens),
+        }
+    }
+
+    fn insert_history(&mut self, data: &[u8], start: usize) {
+        let hashable_end = data.len().saturating_sub(MIN_MATCH - 1);
+        for pos in start.saturating_sub(MAX_DISTANCE)..start.min(hashable_end) {
+            self.insert(pos, hash3(data, pos));
         }
     }
 
@@ -113,12 +132,19 @@ impl MatchFinder {
         }
     }
 
-    /// Greedy parsing: takes the longest match at each position, if there's one.
-    fn greedy(&mut self, data: &[u8], config: Config, tokens: &mut Vec<Token>) {
+    /// Greedy parsing
+    fn greedy(
+        &mut self,
+        data: &[u8],
+        start: usize,
+        end: usize,
+        config: Config,
+        tokens: &mut Vec<Token>,
+    ) -> usize {
         let hashable_end = data.len().saturating_sub(MIN_MATCH - 1);
 
-        let mut pos = 0;
-        while pos < hashable_end {
+        let mut pos = start;
+        while pos < end.min(hashable_end) {
             let hash = hash3(data, pos);
             let (length, distance) = self.longest_match(data, pos, hash, 0, config);
 
@@ -141,12 +167,18 @@ impl MatchFinder {
             }
         }
 
-        tokens.extend(data[pos..].iter().map(|&byte| Token::Literal(byte)));
+        literals_up_to(data, pos, end, tokens)
     }
 
-    /// Lazy parsing: a match is held back for one position, and dropped for a
-    /// literal if the next position has a longer one.
-    fn lazy(&mut self, data: &[u8], config: LazyConfig, tokens: &mut Vec<Token>) {
+    /// Lazy parsing
+    fn lazy(
+        &mut self,
+        data: &[u8],
+        start: usize,
+        end: usize,
+        config: LazyConfig,
+        tokens: &mut Vec<Token>,
+    ) -> usize {
         let hashable_end = data.len().saturating_sub(MIN_MATCH - 1);
         let reduced = Config {
             max_chain: config.search.max_chain >> 2,
@@ -157,8 +189,8 @@ impl MatchFinder {
         let mut prev_length = 0;
         let mut prev_distance = 0;
 
-        let mut pos = 0;
-        while pos < hashable_end {
+        let mut pos = start;
+        while pos < end.min(hashable_end) {
             let hash = hash3(data, pos);
             let (mut length, distance) = if prev_length < config.max_lazy as usize {
                 let search = if prev_length >= config.good_length as usize {
@@ -209,10 +241,10 @@ impl MatchFinder {
                 });
                 pos = pos - 1 + prev_length;
             } else {
-                pos -= 1;
+                tokens.push(Token::Literal(data[pos - 1]));
             }
         }
-        tokens.extend(data[pos..].iter().map(|&byte| Token::Literal(byte)));
+        literals_up_to(data, pos, end, tokens)
     }
 
     #[inline]
@@ -264,6 +296,14 @@ impl MatchFinder {
         self.prev[pos & WINDOW_MASK] = self.head[hash];
         self.head[hash] = pos as u32;
     }
+}
+
+fn literals_up_to(data: &[u8], pos: usize, end: usize, tokens: &mut Vec<Token>) -> usize {
+    if pos >= end {
+        return pos;
+    }
+    tokens.extend(data[pos..end].iter().map(|&byte| Token::Literal(byte)));
+    end
 }
 
 #[inline]

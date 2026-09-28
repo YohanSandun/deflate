@@ -74,48 +74,112 @@ impl OutputOptions {
     }
 }
 
-/// Which kind of DEFLATE blocks the compressor writes (RFC 1951 section 3.2.3).
+/// How hard to compress, from 0 to 9, like zlib's levels: higher levels search
+/// more for repeated data and compress better, but take longer.
 ///
 /// ```
-/// use rust_deflate::{CompressionOptions, Strategy};
+/// use rust_deflate::CompressionLevel;
 ///
-/// let options = CompressionOptions::new().strategy(Strategy::Fixed).level(9);
+/// assert_eq!(CompressionLevel::default(), CompressionLevel::MEDIUM);
+/// assert_eq!(CompressionLevel::new(9), CompressionLevel::BEST);
+/// assert_eq!(CompressionLevel::new(12), CompressionLevel::BEST);
+/// assert_eq!(CompressionLevel::new(4).get(), 4);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CompressionLevel(u8);
+
+impl CompressionLevel {
+    /// 0: no compression. The data is copied into stored blocks as it is.
+    pub const NONE: Self = Self(0);
+    /// 1: the fastest level that compresses.
+    pub const FAST: Self = Self(1);
+    /// 6: a balance of speed and size, and the default.
+    pub const MEDIUM: Self = Self(6);
+    /// 9: the smallest output, and the slowest.
+    pub const BEST: Self = Self(9);
+
+    /// Level `level`. Values above 9 are treated as 9.
+    pub const fn new(level: u8) -> Self {
+        Self(if level > Self::BEST.0 {
+            Self::BEST.0
+        } else {
+            level
+        })
+    }
+
+    /// The level as a number, from 0 to 9.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for CompressionLevel {
+    fn default() -> Self {
+        Self::MEDIUM
+    }
+}
+
+impl From<u8> for CompressionLevel {
+    fn from(level: u8) -> Self {
+        Self::new(level)
+    }
+}
+
+/// Which kind of DEFLATE blocks the compressor writes (RFC 1951 section 3.2.3).
+/// At [`CompressionLevel::NONE`], every strategy writes stored blocks.
+///
+/// ```
+/// use rust_deflate::{CompressionLevel, CompressionOptions, Strategy};
+///
+/// let options = CompressionOptions::new()
+///     .strategy(Strategy::Fixed)
+///     .level(CompressionLevel::BEST);
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Strategy {
     /// Uncompressed blocks only.
-    #[default]
     Stored,
     /// One block with the fixed Huffman codes.
     Fixed,
     /// Splits the input into blocks and writes each as whichever type is smallest,
     /// usually one with Huffman codes built for its data. Levels 8 and 9 search
-    /// for the best split.
+    /// for the best split. The default.
+    #[default]
     Dynamic,
 }
 
-/// Settings for [`compress_with`] and [`compress_zlib_with`].
+/// Settings for [`compress_with`], [`compress_zlib_with`] and the [`Compressor`]
+/// methods ending in `_with`. A [`CompressionLevel`] converts into options with
+/// that level and the default strategy, so it can be passed on its own.
 ///
-/// The default is [`Strategy::Stored`] at level 6.
+/// The default is [`Strategy::Dynamic`] at [`CompressionLevel::MEDIUM`], which
+/// the functions and methods without `_with` use.
+///
+/// ```
+/// use rust_deflate::{compress_with, CompressionLevel, CompressionOptions, Strategy};
+///
+/// let data = b"hello hello hello hello";
+///
+/// let smallest = compress_with(data, CompressionLevel::BEST);
+/// let fixed = compress_with(data, CompressionOptions::new().strategy(Strategy::Fixed));
+/// ```
 ///
 /// [`compress_with`]: crate::compress_with
 /// [`compress_zlib_with`]: crate::compress_zlib_with
+/// [`Compressor`]: crate::Compressor
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionOptions {
     strategy: Strategy,
-    level: u8,
+    level: CompressionLevel,
 }
 
 impl CompressionOptions {
-    /// The highest level: [`CompressionOptions::level`] clamps to it.
-    pub const MAX_LEVEL: u8 = 9;
-
-    /// [`Strategy::Stored`] at level 6.
+    /// [`Strategy::Dynamic`] at [`CompressionLevel::MEDIUM`].
     pub const fn new() -> Self {
         Self {
-            strategy: Strategy::Stored,
-            level: 6,
+            strategy: Strategy::Dynamic,
+            level: CompressionLevel::MEDIUM,
         }
     }
 
@@ -125,15 +189,9 @@ impl CompressionOptions {
         self
     }
 
-    /// How hard to look for repeated data, from 0 to 9: higher levels search more
-    /// and compress better, but take longer. 0 finds no matches at all, so only the
-    /// Huffman coding shrinks the data. Values above 9 are treated as 9.
-    pub const fn level(mut self, level: u8) -> Self {
-        self.level = if level > Self::MAX_LEVEL {
-            Self::MAX_LEVEL
-        } else {
-            level
-        };
+    /// How hard to compress.
+    pub const fn level(mut self, level: CompressionLevel) -> Self {
+        self.level = level;
         self
     }
 
@@ -142,12 +200,18 @@ impl CompressionOptions {
     }
 
     pub(crate) const fn get_level(self) -> u8 {
-        self.level
+        self.level.get()
     }
 }
 
 impl Default for CompressionOptions {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl From<CompressionLevel> for CompressionOptions {
+    fn from(level: CompressionLevel) -> Self {
+        Self::new().level(level)
     }
 }

@@ -1,6 +1,6 @@
 use super::{check_header, write_header};
 use crate::io::bit_writer::BitWriter;
-use crate::options::{CompressionOptions, Strategy};
+use crate::options::{CompressionLevel, CompressionOptions, Strategy};
 
 fn header(options: CompressionOptions) -> [u8; 2] {
     let mut writer = BitWriter::new();
@@ -13,7 +13,7 @@ fn stored_is_always_fastest() {
     for level in 0..=9 {
         let options = CompressionOptions::new()
             .strategy(Strategy::Stored)
-            .level(level);
+            .level(CompressionLevel::new(level));
         assert_eq!(header(options), [0x78, 0x01], "level {level}");
     }
 }
@@ -31,7 +31,7 @@ fn flevel_follows_zlib() {
         (9, [0x78, 0xDA]),
     ] {
         for strategy in [Strategy::Fixed, Strategy::Dynamic] {
-            let options = CompressionOptions::new().strategy(strategy).level(level);
+            let options = CompressionOptions::new().strategy(strategy).level(CompressionLevel::new(level));
             assert_eq!(header(options), want, "{strategy:?} level {level}");
         }
     }
@@ -41,7 +41,7 @@ fn flevel_follows_zlib() {
 fn every_header_passes_check_header() {
     for strategy in [Strategy::Stored, Strategy::Fixed, Strategy::Dynamic] {
         for level in 0..=9 {
-            let options = CompressionOptions::new().strategy(strategy).level(level);
+            let options = CompressionOptions::new().strategy(strategy).level(CompressionLevel::new(level));
             assert_eq!(check_header(&header(options)), Ok(()));
         }
     }

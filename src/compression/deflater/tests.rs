@@ -3,7 +3,7 @@ use crate::compression::block_splitter::{BlockCosts, BlockType, stored_bits};
 use crate::compression::huffman_encoder::{DynamicCodes, Frequencies};
 use crate::compression::lz77::{MatchFinder, Token};
 use crate::io::bit_writer::BitWriter;
-use crate::options::{CompressionOptions, Strategy};
+use crate::options::{CompressionLevel, CompressionOptions, Strategy};
 
 const STORED: CompressionOptions = CompressionOptions::new().strategy(Strategy::Stored);
 const FIXED: CompressionOptions = CompressionOptions::new().strategy(Strategy::Fixed);
@@ -195,14 +195,14 @@ fn output_decodes_with_the_inflater() {
 #[test]
 fn fixed_empty_input_is_just_the_header_and_end_of_block() {
     // BFINAL = 1, BTYPE = 01, then end-of-block (seven 0 bits): what zlib writes.
-    assert_eq!(deflate_with(&[], FIXED.level(0)), vec![0x03, 0x00]);
+    assert_eq!(deflate_with(&[], FIXED.level(CompressionLevel::FAST)), vec![0x03, 0x00]);
 }
 
 #[test]
 fn fixed_literals_only() {
-    // Level 0 finds no matches. "a" is literal 97: fixed code 0x30 + 97 = 0x91 as 8
+    // One byte has no matches. "a" is literal 97: fixed code 0x30 + 97 = 0x91 as 8
     // bits, sent most significant bit first.
-    let options = FIXED.level(0);
+    let options = FIXED.level(CompressionLevel::FAST);
     assert_eq!(deflate_with(b"a", options), vec![0x4B, 0x04, 0x00]);
 }
 
@@ -220,7 +220,7 @@ fn fixed_output_decodes_with_the_inflater() {
 
     for level in 0..=9 {
         for data in &inputs {
-            let decoded = crate::decompress(&deflate_with(data, FIXED.level(level))).unwrap();
+            let decoded = crate::decompress(&deflate_with(data, FIXED.level(CompressionLevel::new(level)))).unwrap();
             assert!(decoded == *data, "level {level}, length {}", data.len());
         }
     }
@@ -277,7 +277,7 @@ fn dynamic_output_decodes_with_the_inflater() {
 
     for level in 0..=9 {
         for data in &inputs {
-            let decoded = crate::decompress(&deflate_with(data, DYNAMIC.level(level))).unwrap();
+            let decoded = crate::decompress(&deflate_with(data, DYNAMIC.level(CompressionLevel::new(level)))).unwrap();
             assert!(decoded == *data, "level {level}, length {}", data.len());
         }
     }
@@ -296,11 +296,12 @@ fn skewed(len: usize) -> Vec<u8> {
 
 #[test]
 fn dynamic_beats_fixed_on_a_small_alphabet() {
-    // Fixed codes spend 8 bits on each of these literals, dynamic about 2.
+    // Fixed codes spend 8 bits on each literal, dynamic about 2. Matches shrink
+    // both, so the gap is smaller than 4 to 1.
     let data = skewed(10_000);
-    let fixed = deflate_with(&data, FIXED.level(0)).len();
-    let dynamic = deflate_with(&data, DYNAMIC.level(0)).len();
-    assert!(dynamic < fixed / 2, "dynamic {dynamic} bytes, fixed {fixed}");
+    let fixed = deflate_with(&data, FIXED.level(CompressionLevel::FAST)).len();
+    let dynamic = deflate_with(&data, DYNAMIC.level(CompressionLevel::FAST)).len();
+    assert!(dynamic * 3 < fixed * 2, "dynamic {dynamic} bytes, fixed {fixed}");
 }
 
 #[test]
@@ -427,7 +428,7 @@ fn each_block_type_is_chosen_when_smallest() {
 fn incompressible_input_barely_grows() {
     for level in 0..=9 {
         let data = noise(100_000, 3);
-        let out = deflate_with(&data, DYNAMIC.level(level));
+        let out = deflate_with(&data, DYNAMIC.level(CompressionLevel::new(level)));
         assert!(out.len() <= data.len() + 5 * 2 + 1, "level {level}: {}", out.len());
     }
 }
@@ -438,7 +439,7 @@ fn mixed_input_is_split_into_blocks() {
     for level in [1, 6, 8, 9] {
         let mut deflater = Deflater::new();
         let mut writer = BitWriter::new();
-        deflater.deflate_into(&data, DYNAMIC.level(level), &mut writer);
+        deflater.deflate_into(&data, DYNAMIC.level(CompressionLevel::new(level)), &mut writer);
 
         assert!(deflater.block_ends.len() > 1, "level {level}");
         assert!(crate::decompress(&writer.finish()).unwrap() == data, "level {level}");
@@ -453,7 +454,7 @@ fn splitting_beats_one_block() {
         let tokens = tokens_for(&data, level);
         let mut costs = BlockCosts::new();
         let (_, one_block) = costs.cheapest(&Frequencies::of(&tokens), data.len(), 0);
-        let split = deflate_with(&data, DYNAMIC.level(level)).len() as u64 * 8;
+        let split = deflate_with(&data, DYNAMIC.level(CompressionLevel::new(level))).len() as u64 * 8;
         assert!(split < one_block * 95 / 100, "level {level}: {split} vs {one_block}");
     }
 }
@@ -461,7 +462,7 @@ fn splitting_beats_one_block() {
 #[test]
 fn higher_levels_split_at_least_as_well() {
     let data = mixed_input();
-    let size = |level| deflate_with(&data, DYNAMIC.level(level)).len();
+    let size = |level| deflate_with(&data, DYNAMIC.level(CompressionLevel::new(level))).len();
     assert!(size(9) <= size(8), "{} vs {}", size(9), size(8));
     assert!(size(8) <= size(7), "{} vs {}", size(8), size(7));
 }
@@ -473,7 +474,7 @@ fn long_input_spanning_several_search_segments_decodes() {
     let mut data = noise(200_000, 4);
     data.extend(skewed(150_000));
     for level in [8, 9] {
-        let out = deflate_with(&data, DYNAMIC.level(level));
+        let out = deflate_with(&data, DYNAMIC.level(CompressionLevel::new(level)));
         assert!(crate::decompress(&out).unwrap() == data, "level {level}");
     }
 }

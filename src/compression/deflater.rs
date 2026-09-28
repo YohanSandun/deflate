@@ -2,12 +2,22 @@ use crate::compression::block_splitter::{self, BlockCosts, BlockType};
 use crate::compression::huffman_encoder::{
     self, Code, DynamicCodes, END_OF_BLOCK, FixedCodes, Frequencies,
 };
-use crate::compression::lz77::{MatchFinder, Token};
+use crate::compression::lz77::{MAX_MATCH, MatchFinder, Token};
 use crate::compression::tables::CODE_LENGTH_ORDER;
 use crate::io::bit_writer::BitWriter;
 use crate::options::{CompressionOptions, Strategy};
 
 pub(crate) const MAX_STORED_BLOCK: usize = 65_535;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChunkEnd {
+    /// More input follows.
+    More,
+    /// More input may follow, but everything so far must be written out.
+    Flush,
+    /// The end of the stream.
+    Last,
+}
 
 pub(crate) fn output_bound(data_len: usize) -> usize {
     data_len + 5 * data_len.div_ceil(MAX_STORED_BLOCK).max(1)
@@ -37,19 +47,44 @@ impl Deflater {
         options: CompressionOptions,
         writer: &mut BitWriter,
     ) {
-        if options.get_strategy() == Strategy::Stored {
-            Self::write_stored_blocks(writer, data, true);
-            return;
+        self.deflate_chunk(data, 0, ChunkEnd::Last, options, writer);
+    }
+    
+    pub(crate) fn deflate_chunk(
+        &mut self,
+        data: &[u8],
+        start: usize,
+        chunk_end: ChunkEnd,
+        options: CompressionOptions,
+        writer: &mut BitWriter,
+    ) -> usize {
+        let last = chunk_end == ChunkEnd::Last;
+        let end = match chunk_end {
+            ChunkEnd::More => data.len().saturating_sub(MAX_MATCH).max(start),
+            ChunkEnd::Flush | ChunkEnd::Last => data.len(),
+        };
+        if end == start && !last {
+            return start;
+        }
+        
+        if options.get_strategy() == Strategy::Stored || options.get_level() == 0 {
+            Self::write_stored_blocks(writer, &data[start..end], last);
+            return end;
         }
 
-        self.match_finder
-            .find_tokens(data, options.get_level(), &mut self.tokens);
+        let end = self.match_finder.find_tokens_in(
+            data,
+            start,
+            end,
+            options.get_level(),
+            &mut self.tokens,
+        );
         let costs = self
             .costs
             .get_or_insert_with(|| Box::new(BlockCosts::new()));
 
         match options.get_strategy() {
-            Strategy::Fixed => Self::write_fixed_block(writer, &costs.fixed, &self.tokens, true),
+            Strategy::Fixed => Self::write_fixed_block(writer, &costs.fixed, &self.tokens, last),
             _ => {
                 block_splitter::split(
                     &self.tokens,
@@ -58,22 +93,27 @@ impl Deflater {
                     &mut self.block_ends,
                 );
 
-                let (mut start, mut byte_start) = (0, 0);
-                for (i, &end) in self.block_ends.iter().enumerate() {
-                    let tokens = &self.tokens[start..end];
+                let (mut token_start, mut byte_start) = (0, start);
+                for (i, &token_end) in self.block_ends.iter().enumerate() {
+                    let tokens = &self.tokens[token_start..token_end];
                     let byte_end = byte_start + block_splitter::byte_len(tokens);
-                    let last = i == self.block_ends.len() - 1;
+                    let last_block = last && i == self.block_ends.len() - 1;
                     Self::write_cheapest_block(
                         writer,
                         costs,
                         tokens,
                         &data[byte_start..byte_end],
-                        last,
+                        last_block,
                     );
-                    (start, byte_start) = (end, byte_end);
+                    (token_start, byte_start) = (token_end, byte_end);
                 }
             }
         }
+        end
+    }
+    
+    pub(crate) fn write_sync_flush(writer: &mut BitWriter) {
+        Self::write_stored_block(writer, &[], false);
     }
 
     /// Writes `tokens`, which stand for `data`, as whichever block type is smallest.

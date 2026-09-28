@@ -81,23 +81,26 @@ pub(crate) fn inflate_into(
     Ok(inflated.output_added)
 }
 
-pub(crate) fn deflate(
+/// How much to reserve for a zlib stream of `data_len` bytes: enough for it as
+/// stored blocks.
+pub(crate) fn output_bound(data_len: usize) -> usize {
+    2 + deflater::output_bound(data_len) + 4
+}
+
+pub(crate) fn deflate_into(
     deflater: &mut Deflater,
     data: &[u8],
     options: CompressionOptions,
-) -> Vec<u8> {
-    let mut writer = BitWriter::with_capacity(2 + deflater::output_bound(data.len()) + 4);
-
-    write_header(&mut writer, options);
-    deflater.deflate_into(data, options, &mut writer);
+    writer: &mut BitWriter,
+) {
+    write_header(writer, options);
+    deflater.deflate_into(data, options, writer);
 
     writer.align_to_byte();
     writer.write_bytes(&adler32::compute_adler32(data).to_be_bytes());
-
-    writer.finish()
 }
 
-fn write_header(writer: &mut BitWriter, options: CompressionOptions) {
+pub(crate) fn write_header(writer: &mut BitWriter, options: CompressionOptions) {
     const CMF: u32 = 0x78; // CM = 8, CINFO = 7
     
     let flevel = match (options.get_strategy(), options.get_level()) {
